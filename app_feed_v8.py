@@ -27,7 +27,7 @@ VALID_WIND_DIRS = {
     "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW",
 }
 
-api = FastAPI(title="Meteo Arbus-Guspini API", version="8.0-feed-wind-fallback")
+api = FastAPI(title="Meteo Arbus-Guspini API", version="9.0-rain-rate-accumulation")
 api.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -249,6 +249,110 @@ def cardinal_to_degrees(cardinal: Optional[str]) -> Optional[float]:
     return mapping.get(str(cardinal).upper().strip())
 
 
+
+def rain_rate_mm_h(obs: Dict[str, Any]) -> Optional[float]:
+    metric = nested(obs, "metric", "metric_si")
+    imperial = nested(obs, "imperial")
+    uk_hybrid = nested(obs, "uk_hybrid")
+    value = safe_float(first_value([metric, uk_hybrid, obs], ("precipRate", "precip_rate", "rainRate")))
+    if value is None:
+        value = inches_to_mm(safe_float(first_value([imperial], ("precipRate", "precip_rate", "rainRate"))))
+    return value
+
+
+def rain_total_mm(obs: Dict[str, Any]) -> Optional[float]:
+    metric = nested(obs, "metric", "metric_si")
+    imperial = nested(obs, "imperial")
+    uk_hybrid = nested(obs, "uk_hybrid")
+    value = safe_float(first_value([metric, uk_hybrid, obs], ("precipTotal", "precip_total", "rainTotal")))
+    if value is None:
+        value = inches_to_mm(safe_float(first_value([imperial], ("precipTotal", "precip_total", "rainTotal"))))
+    return value
+
+
+def ordered_observations(lists: List[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+    by_epoch: Dict[int, Dict[str, Any]] = {}
+    for group in lists:
+        for obs in group:
+            epoch = observation_epoch(obs)
+            if epoch is None:
+                continue
+            key = int(epoch)
+            current = by_epoch.get(key)
+            if current is None or len(obs) > len(current):
+                by_epoch[key] = obs
+    return [by_epoch[k] for k in sorted(by_epoch)]
+
+
+def rain_window_stats(
+    lists: List[List[Dict[str, Any]]],
+    latest: Dict[str, Any],
+    hours: int,
+) -> Dict[str, Any]:
+    latest_epoch = observation_epoch(latest)
+    if latest_epoch is None:
+        return {"accumulation_mm": None, "max_rate_mm_h": None, "complete": False, "samples": 0}
+
+    start_epoch = latest_epoch - hours * 3600
+    observations = ordered_observations(lists)
+    baseline: Optional[Dict[str, Any]] = None
+    window: List[Dict[str, Any]] = []
+
+    for obs in observations:
+        epoch = observation_epoch(obs)
+        if epoch is None or epoch > latest_epoch + 60:
+            continue
+        if epoch <= start_epoch:
+            baseline = obs
+        elif epoch <= latest_epoch + 60:
+            window.append(obs)
+
+    sequence: List[Dict[str, Any]] = []
+    if baseline is not None:
+        sequence.append(baseline)
+    sequence.extend(window)
+
+    points: List[tuple[float, float]] = []
+    for obs in sequence:
+        epoch = observation_epoch(obs)
+        total = rain_total_mm(obs)
+        if epoch is not None and total is not None and total >= 0:
+            points.append((epoch, total))
+
+    accumulation: Optional[float] = None
+    if len(points) >= 2:
+        total_acc = 0.0
+        previous = points[0][1]
+        for _, current in points[1:]:
+            if current + 0.05 >= previous:
+                delta = max(0.0, current - previous)
+            else:
+                # Il contatore giornaliero si è azzerato a mezzanotte.
+                delta = max(0.0, current)
+            if delta <= 500:
+                total_acc += delta
+            previous = current
+        accumulation = round(total_acc, 2)
+
+    rates: List[float] = []
+    for obs in window:
+        rate = rain_rate_mm_h(obs)
+        if rate is not None and 0 <= rate <= 1000:
+            rates.append(rate)
+    current_rate = rain_rate_mm_h(latest)
+    if current_rate is not None and 0 <= current_rate <= 1000:
+        rates.append(current_rate)
+
+    max_rate = round(max(rates), 2) if rates else None
+    complete = baseline is not None and bool(window)
+    return {
+        "accumulation_mm": accumulation,
+        "max_rate_mm_h": max_rate,
+        "complete": complete,
+        "samples": len(window),
+    }
+
+
 def parse_observation(obs: Dict[str, Any]) -> Dict[str, Any]:
     metric = nested(obs, "metric", "metric_si")
     imperial = nested(obs, "imperial")
@@ -277,9 +381,8 @@ def parse_observation(obs: Dict[str, Any]) -> Dict[str, Any]:
     if pressure_hpa is None:
         pressure_hpa = inhg_to_hpa(safe_float(first_value([imperial], ("pressure", "pressureMeanSeaLevel"))))
 
-    precip_mm = safe_float(first_value([metric, uk_hybrid], ("precipTotal", "precipRate", "precip_total")))
-    if precip_mm is None:
-        precip_mm = inches_to_mm(safe_float(first_value([imperial], ("precipTotal", "precipRate", "precip_total"))))
+    precip_rate = rain_rate_mm_h(obs)
+    precip_total = rain_total_mm(obs)
 
     wind_dir = first_value([obs, metric, imperial], ("winddirCardinal", "windDirectionCardinal"))
     if wind_dir is not None:
@@ -317,10 +420,16 @@ def parse_observation(obs: Dict[str, Any]) -> Dict[str, Any]:
     if pressure_hpa is not None and not 850 <= pressure_hpa <= 1100:
         warnings.append("Pressione fuori intervallo")
         pressure_hpa = None
+    if precip_rate is not None and not 0 <= precip_rate <= 1000:
+        warnings.append("Rain rate fuori intervallo")
+        precip_rate = None
+    if precip_total is not None and not 0 <= precip_total <= 3000:
+        warnings.append("Accumulo giornaliero fuori intervallo")
+        precip_total = None
 
     return {
         "source": "wunderground_background_feed",
-        "parser_version": "8.0-feed-wind-fallback",
+        "parser_version": "9.0-rain-rate-accumulation",
         "status": "feed_read",
         "updated": first_value([obs], ("obsTimeLocal", "obsTimeUtc", "validTimeUtc")),
         "epoch": first_value([obs], ("epoch", "validTimeUtc")),
@@ -332,7 +441,8 @@ def parse_observation(obs: Dict[str, Any]) -> Dict[str, Any]:
         "wind_speed_kmh": None if wind_kmh is None else round(wind_kmh, 1),
         "wind_gust_kmh": None if gust_kmh is None else round(gust_kmh, 1),
         "pressure_hpa": None if pressure_hpa is None else round(pressure_hpa, 1),
-        "rain_today_mm": None if precip_mm is None else round(precip_mm, 1),
+        "rain_rate_mm_h": None if precip_rate is None else round(precip_rate, 1),
+        "rain_today_mm": None if precip_total is None else round(precip_total, 1),
         "quality_warnings": warnings,
     }
 
@@ -343,7 +453,7 @@ def scrape_station(browser: Browser, code: str, meta: Dict[str, str]) -> Dict[st
         "station_name": meta["name"],
         "url": meta["url"],
         "captured_at_utc": datetime.now(timezone.utc).isoformat(),
-        "parser_version": "8.0-feed-wind-fallback",
+        "parser_version": "9.0-rain-rate-accumulation",
         "data": None,
         "errors": [],
         "diagnostics": {},
@@ -424,6 +534,12 @@ def scrape_station(browser: Browser, code: str, meta: Dict[str, str]) -> Dict[st
                 None if wind_direction_age_seconds is None
                 else round(wind_direction_age_seconds)
             )
+            for hours in (1, 6, 12, 24):
+                stats = rain_window_stats(lists, latest, hours)
+                output["data"][f"rain_{hours}h_mm"] = stats["accumulation_mm"]
+                output["data"][f"rain_rate_max_{hours}h_mm_h"] = stats["max_rate_mm_h"]
+                output["data"][f"rain_window_{hours}h_complete"] = stats["complete"]
+                output["data"][f"rain_window_{hours}h_samples"] = stats["samples"]
         return output
 
     except Exception as exc:
@@ -454,7 +570,7 @@ def root() -> Dict[str, str]:
     return {
         "status": "ok",
         "message": "Backend meteo Arbus-Guspini attivo",
-        "parser": "Weather Underground background feed v8 con recupero direzione",
+        "parser": "Weather Underground background feed v9 con rain rate e accumuli",
         "endpoint": "/stations",
     }
 
