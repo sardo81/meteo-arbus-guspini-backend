@@ -2,12 +2,17 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+import json
+import os
 import re
+import secrets
 import time
 from datetime import datetime, timezone
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 from typing import Any, Dict, Iterable, List, Optional
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from playwright.sync_api import Browser, Page, Response, sync_playwright
 
@@ -32,12 +37,77 @@ api.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_credentials=False,
-    allow_methods=["GET", "HEAD"],
+    allow_methods=["GET", "HEAD", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
 
 CACHE_SECONDS = 300
 _cache: Dict[str, Any] = {"timestamp": 0.0, "data": None}
+
+
+# --- Archivio cloud per automazione -----------------------------------------
+SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip().rstrip("/")
+SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+AUTOMATION_SECRET = os.getenv("AUTOMATION_SECRET", "").strip()
+AUTOMATION_STATE_ID = "main"
+
+
+def _cloud_configured() -> bool:
+    return bool(SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY)
+
+
+def _supabase_request(path: str, method: str = "GET", payload: Any = None, prefer: Optional[str] = None) -> Any:
+    if not _cloud_configured():
+        raise RuntimeError("Archivio cloud non configurato: mancano SUPABASE_URL o SUPABASE_SERVICE_ROLE_KEY")
+    body = None if payload is None else json.dumps(payload).encode("utf-8")
+    headers = {
+        "apikey": SUPABASE_SERVICE_ROLE_KEY,
+        "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+        "Accept": "application/json",
+    }
+    if body is not None:
+        headers["Content-Type"] = "application/json"
+    if prefer:
+        headers["Prefer"] = prefer
+    request = Request(f"{SUPABASE_URL}/rest/v1/{path}", data=body, headers=headers, method=method)
+    try:
+        with urlopen(request, timeout=30) as response:
+            raw = response.read().decode("utf-8")
+            return json.loads(raw) if raw else None
+    except HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Supabase HTTP {exc.code}: {detail[:500]}") from exc
+    except URLError as exc:
+        raise RuntimeError(f"Supabase non raggiungibile: {exc}") from exc
+
+
+def cloud_state_get() -> Dict[str, Any]:
+    rows = _supabase_request(
+        f"automation_state?id=eq.{AUTOMATION_STATE_ID}&select=payload,updated_at",
+        method="GET",
+    )
+    if not rows:
+        return {"state": {"history": [], "archive": [], "settings": {}}, "updated_at": None}
+    row = rows[0]
+    payload = row.get("payload") if isinstance(row, dict) else None
+    if not isinstance(payload, dict):
+        payload = {"history": [], "archive": [], "settings": {}}
+    return {"state": payload, "updated_at": row.get("updated_at")}
+
+
+def cloud_state_put(state: Dict[str, Any]) -> Dict[str, Any]:
+    row = {
+        "id": AUTOMATION_STATE_ID,
+        "payload": state,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    result = _supabase_request(
+        "automation_state?on_conflict=id",
+        method="POST",
+        payload=[row],
+        prefer="resolution=merge-duplicates,return=representation",
+    )
+    return {"status": "ok", "rows": len(result or []), "updated_at": row["updated_at"]}
 
 
 def safe_float(value: Any) -> Optional[float]:
@@ -579,6 +649,48 @@ def root() -> Dict[str, str]:
 @api.head("/health")
 def health() -> Dict[str, str]:
     return {"status": "ok"}
+
+
+
+
+@api.get("/automation/state")
+def automation_state_get() -> Dict[str, Any]:
+    if not _cloud_configured():
+        return {
+            "configured": False,
+            "state": {"history": [], "archive": [], "settings": {}},
+            "updated_at": None,
+        }
+    result = cloud_state_get()
+    result["configured"] = True
+    return result
+
+
+@api.post("/automation/state")
+def automation_state_post(payload: Dict[str, Any], x_automation_secret: Optional[str] = Header(default=None)) -> Dict[str, Any]:
+    if not AUTOMATION_SECRET:
+        raise HTTPException(status_code=503, detail="AUTOMATION_SECRET non configurato")
+    if not x_automation_secret or not secrets.compare_digest(x_automation_secret, AUTOMATION_SECRET):
+        raise HTTPException(status_code=401, detail="Chiave automazione non valida")
+    state = payload.get("state") if isinstance(payload, dict) else None
+    if not isinstance(state, dict):
+        raise HTTPException(status_code=400, detail="Payload state non valido")
+    history = state.get("history")
+    archive = state.get("archive")
+    if history is not None and not isinstance(history, list):
+        raise HTTPException(status_code=400, detail="history deve essere una lista")
+    if archive is not None and not isinstance(archive, list):
+        raise HTTPException(status_code=400, detail="archive deve essere una lista")
+    return cloud_state_put(state)
+
+
+@api.get("/automation/status")
+def automation_status() -> Dict[str, Any]:
+    return {
+        "configured": _cloud_configured(),
+        "secret_configured": bool(AUTOMATION_SECRET),
+        "state_id": AUTOMATION_STATE_ID,
+    }
 
 
 @api.get("/stations")
