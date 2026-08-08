@@ -62,9 +62,13 @@ def _supabase_request(path: str, method: str = "GET", payload: Any = None, prefe
     body = None if payload is None else json.dumps(payload).encode("utf-8")
     headers = {
         "apikey": SUPABASE_SERVICE_ROLE_KEY,
-        "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
         "Accept": "application/json",
     }
+    # Le nuove chiavi Supabase sb_secret_* non sono JWT e non devono
+    # essere inviate come Bearer token. Manteniamo invece compatibilita'
+    # con la vecchia service_role JWT, se in futuro venisse usata.
+    if not SUPABASE_SERVICE_ROLE_KEY.startswith("sb_secret_"):
+        headers["Authorization"] = f"Bearer {SUPABASE_SERVICE_ROLE_KEY}"
     if body is not None:
         headers["Content-Type"] = "application/json"
     if prefer:
