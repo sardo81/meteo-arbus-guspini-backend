@@ -85,18 +85,58 @@ def merge_meta(state: dict, run_key: str) -> dict:
 def main() -> int:
     now = datetime.now(ROME)
     slot, action = normalized_slot(now)
-    if not action:
+
+    # Test manuale sicuro: abilitarlo con AUTOMATION_TEST=1.
+    # Fuori dagli slot reali verifica Chromium + frontend + lettura cloud,
+    # senza modificare archivio, storico o stato Supabase.
+    test_requested = os.getenv("AUTOMATION_TEST", "").strip().lower() in {"1", "true", "yes", "on"}
+
+    if not action and not test_requested:
         print(f"NOOP {now.isoformat(timespec='seconds')} - nessuna operazione prevista")
         return 0
 
     frontend = env("FRONTEND_URL")
     backend = env("BACKEND_URL")
-    secret = env("AUTOMATION_SECRET")
-    run_key = f"{now.date().isoformat()}_{slot[0]:02d}{slot[1]:02d}"
+    secret = env("AUTOMATION_SECRET") if action else ""
+    run_key = (
+        f"{now.date().isoformat()}_{slot[0]:02d}{slot[1]:02d}"
+        if action
+        else f"TEST_{now.strftime('%Y%m%d_%H%M%S')}"
+    )
 
     cloud = http_json(f"{backend}/automation/state")
     state = cloud.get("state") if isinstance(cloud.get("state"), dict) else {}
     meta = state.get("automationMeta") if isinstance(state.get("automationMeta"), dict) else {}
+
+    # Smoke test manuale fuori dagli slot operativi.
+    if not action and test_requested:
+        from playwright.sync_api import sync_playwright
+
+        history = state.get("history") if isinstance(state.get("history"), list) else []
+        archive = state.get("archive") if isinstance(state.get("archive"), list) else []
+        print(
+            f"TEST START {now.isoformat(timespec='seconds')} "
+            f"cloud_history={len(history)} cloud_archive={len(archive)}"
+        )
+
+        with sync_playwright() as p:
+            browser = p.chromium.launch(
+                headless=True,
+                args=["--disable-dev-shm-usage", "--no-sandbox"],
+            )
+            context = browser.new_context(timezone_id="Europe/Rome", locale="it-IT")
+            page = context.new_page()
+            page.goto(frontend, wait_until="domcontentloaded", timeout=120000)
+            page.wait_for_selector("#forecastTime", timeout=30000)
+            title = page.title()
+            browser.close()
+
+        print(
+            f"TEST OK chromium=ok frontend=ok cloud=ok "
+            f"title={title!r} history={len(history)} archive={len(archive)}"
+        )
+        return 0
+
     if run_key in (meta.get("completedRuns") or []):
         print(f"SKIP {run_key} - già completato")
         return 0
