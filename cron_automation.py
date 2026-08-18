@@ -206,8 +206,11 @@ def main() -> int:
                 timeout=120000,
             )
 
+            # L'area tecnica della Home pubblica può essere chiusa:
+            # ci basta che forecastTime esista nel DOM, non che sia visibile.
             page.wait_for_selector(
                 "#forecastTime",
+                state="attached",
                 timeout=30000,
             )
 
@@ -284,8 +287,10 @@ def main() -> int:
             timeout=120000,
         )
 
+        # La sezione tecnica può essere chiusa: l'elemento deve solo esistere.
         page.wait_for_selector(
             "#forecastTime",
+            state="attached",
             timeout=30000,
         )
 
@@ -314,6 +319,7 @@ def main() -> int:
 
         page.wait_for_selector(
             "#forecastTime",
+            state="attached",
             timeout=30000,
         )
 
@@ -368,7 +374,10 @@ def main() -> int:
         )
 
         # -----------------------------------------------------
-        # Imposta l'ora di validità della previsione.
+        # Imposta l'ora di validità.
+        #
+        # NON usa locator.fill(): forecastTime può essere nascosto
+        # dentro il pannello tecnico chiuso della Home pubblica.
         # -----------------------------------------------------
         def set_time(
             hour: int,
@@ -385,9 +394,18 @@ def main() -> int:
 
             value = iso_local(target)
 
-            page.locator(
-                "#forecastTime"
-            ).fill(value)
+            page.evaluate(
+                """(value) => {
+                    const e = document.getElementById('forecastTime');
+                    if (!e) {
+                        throw new Error('forecastTime non trovato');
+                    }
+                    e.value = value;
+                    e.dispatchEvent(new Event('input', {bubbles:true}));
+                    e.dispatchEvent(new Event('change', {bubbles:true}));
+                }""",
+                value,
+            )
 
             return value
 
@@ -547,17 +565,6 @@ def main() -> int:
 
     # ---------------------------------------------------------
     # NOTIFICHE PUSH
-    #
-    # Dopo aver salvato lo stato aggiornato controlla
-    # automaticamente eventuali:
-    #
-    # - temporali
-    # - piogge intense
-    # - vento forte
-    # - caldo intenso
-    #
-    # Un problema alle notifiche NON deve bloccare
-    # l'automazione meteo principale.
     # ---------------------------------------------------------
     try:
         notification_result = http_json(
@@ -587,9 +594,6 @@ def main() -> int:
             file=sys.stderr,
         )
 
-    # ---------------------------------------------------------
-    # Chiusura corretta dello slot.
-    # ---------------------------------------------------------
     print(
         f"DONE {run_key} "
         f"history="
