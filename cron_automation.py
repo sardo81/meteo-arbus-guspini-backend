@@ -438,17 +438,83 @@ def main() -> int:
                     "archiveForecast()"
                 )
 
+                archive_check = page.evaluate(
+                    """(value) => {
+                        const rows = JSON.parse(
+                            localStorage.getItem('meteoForecastArchiveV1') || '[]'
+                        );
+                        const same = rows.filter(
+                            x => x && x.validTime === value
+                        );
+                        const pending = same.filter(x => !x.verified);
+                        const places = [...new Set(
+                            pending.map(x => x.place).filter(Boolean)
+                        )].sort();
+                        return {
+                            total: same.length,
+                            pending: pending.length,
+                            places
+                        };
+                    }""",
+                    value,
+                )
+
                 print(
                     f"ARCHIVE {value} "
                     f"status="
-                    f"{page.locator('#status').inner_text()[:220]}"
+                    f"{page.locator('#status').inner_text()[:220]} "
+                    f"check={archive_check}"
                 )
+
+                expected_places = {"Arbus", "Guspini"}
+                got_places = set(archive_check.get("places") or [])
+                if (
+                    int(archive_check.get("pending") or 0) < 2
+                    or not expected_places.issubset(got_places)
+                ):
+                    raise RuntimeError(
+                        f"ARCHIVE_INTEGRITY_FAIL {value}: "
+                        f"pending={archive_check.get('pending')} "
+                        f"places={archive_check.get('places')}"
+                    )
 
         # -----------------------------------------------------
         # Verifica una previsione con le osservazioni reali.
         # -----------------------------------------------------
         def verify(hour: int):
             value = set_time(hour)
+
+            # Prima di leggere le osservazioni, la previsione prospettica
+            # deve esistere davvero nell'archivio per entrambe le localita'.
+            # In caso contrario NON consentiamo il fallback del frontend a
+            # un confronto immediato, che falserebbe il significato di DONE.
+            precheck = page.evaluate(
+                """(value) => {
+                    const rows = JSON.parse(
+                        localStorage.getItem('meteoForecastArchiveV1') || '[]'
+                    );
+                    const same = rows.filter(
+                        x => x && x.validTime === value && !x.verified
+                    );
+                    const places = [...new Set(
+                        same.map(x => x.place).filter(Boolean)
+                    )].sort();
+                    return {pending: same.length, places};
+                }""",
+                value,
+            )
+
+            expected_places = {"Arbus", "Guspini"}
+            pre_places = set(precheck.get("places") or [])
+            if (
+                int(precheck.get("pending") or 0) < 2
+                or not expected_places.issubset(pre_places)
+            ):
+                raise RuntimeError(
+                    f"VERIFY_NO_ARCHIVED_FORECAST {value}: "
+                    f"pending={precheck.get('pending')} "
+                    f"places={precheck.get('places')}"
+                )
 
             page.evaluate(
                 "async () => await loadStationObservations()"
@@ -459,6 +525,37 @@ def main() -> int:
                 .inner_text()
             )
 
+            # loadStationObservations() sincronizza nuovamente il cloud.
+            # Ricontrolliamo l'archivio dopo quella sincronizzazione: se i
+            # record sparissero durante il refresh, fermiamo il run prima di
+            # salvare confronti non prospettici.
+            synced_precheck = page.evaluate(
+                """(value) => {
+                    const rows = JSON.parse(
+                        localStorage.getItem('meteoForecastArchiveV1') || '[]'
+                    );
+                    const same = rows.filter(
+                        x => x && x.validTime === value && !x.verified
+                    );
+                    const places = [...new Set(
+                        same.map(x => x.place).filter(Boolean)
+                    )].sort();
+                    return {pending: same.length, places};
+                }""",
+                value,
+            )
+
+            synced_places = set(synced_precheck.get("places") or [])
+            if (
+                int(synced_precheck.get("pending") or 0) < 2
+                or not expected_places.issubset(synced_places)
+            ):
+                raise RuntimeError(
+                    f"VERIFY_ARCHIVE_LOST_AFTER_SYNC {value}: "
+                    f"pending={synced_precheck.get('pending')} "
+                    f"places={synced_precheck.get('places')}"
+                )
+
             page.evaluate(
                 "saveObservation()"
             )
@@ -468,6 +565,36 @@ def main() -> int:
                 .inner_text()
             )
 
+            postcheck = page.evaluate(
+                """(value) => {
+                    const history = JSON.parse(
+                        localStorage.getItem('meteoHistoryV5') || '[]'
+                    );
+                    const archive = JSON.parse(
+                        localStorage.getItem('meteoForecastArchiveV1') || '[]'
+                    );
+                    const h = history.filter(
+                        x => x && x.source === 'archive' && x.when === value
+                    );
+                    const a = archive.filter(
+                        x => x && x.validTime === value && x.verified
+                    );
+                    const historyPlaces = [...new Set(
+                        h.map(x => x.place).filter(Boolean)
+                    )].sort();
+                    const archivePlaces = [...new Set(
+                        a.map(x => x.place).filter(Boolean)
+                    )].sort();
+                    return {
+                        historyArchive: h.length,
+                        verifiedArchive: a.length,
+                        historyPlaces,
+                        archivePlaces
+                    };
+                }""",
+                value,
+            )
+
             print(
                 f"VERIFY {value} "
                 f"stations={station_status[:220]}"
@@ -475,8 +602,25 @@ def main() -> int:
 
             print(
                 f"VERIFY {value} "
-                f"save={save_status[:220]}"
+                f"save={save_status[:220]} "
+                f"check={postcheck}"
             )
+
+            history_places = set(postcheck.get("historyPlaces") or [])
+            archive_places = set(postcheck.get("archivePlaces") or [])
+            if (
+                int(postcheck.get("historyArchive") or 0) < 2
+                or int(postcheck.get("verifiedArchive") or 0) < 2
+                or not expected_places.issubset(history_places)
+                or not expected_places.issubset(archive_places)
+            ):
+                raise RuntimeError(
+                    f"VERIFY_INTEGRITY_FAIL {value}: "
+                    f"history_archive={postcheck.get('historyArchive')} "
+                    f"verified_archive={postcheck.get('verifiedArchive')} "
+                    f"history_places={postcheck.get('historyPlaces')} "
+                    f"archive_places={postcheck.get('archivePlaces')}"
+                )
 
         # -----------------------------------------------------
         # Azioni programmate.
