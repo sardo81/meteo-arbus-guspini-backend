@@ -84,7 +84,10 @@ def _fetch_station_observations(days: int) -> List[Dict[str, Any]]:
         datetime.min.time(),
         tzinfo=ROME_TZ,
     )
-    start_utc = start_local.astimezone(timezone.utc).isoformat()
+    # PostgREST interpreta il carattere "+" della timezone dentro la query
+    # come spazio se non codificato. Usiamo quindi il formato UTC con "Z",
+    # valido per timestamptz e sicuro nella URL.
+    start_utc = start_local.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     rows = _supabase_request(
         f"{STATION_OBSERVATIONS_TABLE}"
