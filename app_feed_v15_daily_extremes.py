@@ -93,7 +93,7 @@ def _fetch_station_observations(days: int) -> List[Dict[str, Any]]:
         f"{STATION_OBSERVATIONS_TABLE}"
         "?select=station_code,station_name,observed_at_utc,temperature_c"
         f"&observed_at_utc=gte.{start_utc}"
-        "&order=observed_at_utc.asc"
+        "&order=observed_at_utc.desc"
         f"&limit={DAILY_EXTREMES_MAX_ROWS}",
         method="GET",
     )
