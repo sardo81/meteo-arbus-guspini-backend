@@ -8,6 +8,7 @@ import os
 import re
 import secrets
 import time
+from threading import Lock
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 from urllib.error import HTTPError, URLError
@@ -64,6 +65,13 @@ RAIN_ACCUM_AGREEMENT_REL_TOL = 0.35
 STATION_OBSERVATIONS_TABLE = "station_observations"
 STATION_OBSERVATIONS_RECENT_DEFAULT = 200
 STATION_OBSERVATIONS_RECENT_MAX = 5000
+STATION_OBSERVATIONS_INCREMENTAL_PAGE_SIZE = 1000
+_station_observations_cache: Dict[str, Any] = {
+    "rows": [],
+    "capacity": 0,
+    "latest_observed_at_utc": None,
+}
+_station_observations_cache_lock = Lock()
 
 PUSH_SUBSCRIPTIONS_TABLE = "push_subscriptions"
 VAPID_PUBLIC_KEY = os.getenv("VAPID_PUBLIC_KEY", "").strip()
@@ -786,13 +794,91 @@ def save_station_observation_snapshots(
         }
 
 
+def _postgrest_utc_cursor(value: Any) -> Optional[str]:
+    """Normalizza un timestamptz per usarlo in una query PostgREST senza caratteri '+'."""
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    except Exception:
+        return None
+
+
+def _observation_cache_key(row: Dict[str, Any]) -> tuple[Any, Any, Any]:
+    """Chiave stabile per deduplicare bootstrap e aggiornamenti incrementali."""
+    return (row.get("id"), row.get("station_code"), row.get("observed_at_utc"))
+
+
 def recent_station_observations(limit: int = STATION_OBSERVATIONS_RECENT_DEFAULT) -> List[Dict[str, Any]]:
+    """Restituisce le osservazioni recenti evitando di riscaricare l'intero archivio.
+
+    Il primo accesso (o una richiesta con un limite maggiore della cache esistente)
+    effettua un bootstrap compatibile con il comportamento storico. Le chiamate
+    successive interrogano Supabase soltanto dal timestamp più recente già noto,
+    poi fondono e deduplicano i nuovi record nella cache in memoria.
+    """
     limit = max(1, min(int(limit), STATION_OBSERVATIONS_RECENT_MAX))
-    rows = _supabase_request(
-        f"{STATION_OBSERVATIONS_TABLE}?select=*&order=observed_at_utc.desc&limit={limit}",
-        method="GET",
-    )
-    return rows if isinstance(rows, list) else []
+
+    # Un lock unico evita che due richieste quasi simultanee facciano entrambe
+    # lo stesso costoso bootstrap da migliaia di righe.
+    with _station_observations_cache_lock:
+        cached_rows = _station_observations_cache.get("rows")
+        cached_capacity = int(_station_observations_cache.get("capacity") or 0)
+
+        if not isinstance(cached_rows, list) or not cached_rows or cached_capacity < limit:
+            rows = _supabase_request(
+                f"{STATION_OBSERVATIONS_TABLE}?select=*&order=observed_at_utc.desc&limit={limit}",
+                method="GET",
+            )
+            rows = [row for row in (rows or []) if isinstance(row, dict)]
+            latest = rows[0].get("observed_at_utc") if rows else None
+            _station_observations_cache.update({
+                "rows": rows,
+                "capacity": limit,
+                "latest_observed_at_utc": latest,
+            })
+            return list(rows[:limit])
+
+        cursor = _postgrest_utc_cursor(
+            _station_observations_cache.get("latest_observed_at_utc")
+        )
+        if cursor:
+            # gte (non gt) rende sicuro il caso raro in cui due stazioni abbiano
+            # esattamente lo stesso timestamp; la deduplicazione elimina la riga
+            # di confine già presente in cache.
+            fresh = _supabase_request(
+                f"{STATION_OBSERVATIONS_TABLE}?select=*"
+                f"&observed_at_utc=gte.{cursor}"
+                "&order=observed_at_utc.asc"
+                f"&limit={STATION_OBSERVATIONS_INCREMENTAL_PAGE_SIZE}",
+                method="GET",
+            )
+            fresh_rows = [row for row in (fresh or []) if isinstance(row, dict)]
+
+            if fresh_rows:
+                merged: Dict[tuple[Any, Any, Any], Dict[str, Any]] = {
+                    _observation_cache_key(row): row for row in cached_rows
+                }
+                for row in fresh_rows:
+                    merged[_observation_cache_key(row)] = row
+
+                merged_rows = list(merged.values())
+                merged_rows.sort(
+                    key=lambda row: str(row.get("observed_at_utc") or ""),
+                    reverse=True,
+                )
+                merged_rows = merged_rows[:cached_capacity]
+                latest = merged_rows[0].get("observed_at_utc") if merged_rows else None
+                _station_observations_cache.update({
+                    "rows": merged_rows,
+                    "latest_observed_at_utc": latest,
+                })
+                cached_rows = merged_rows
+
+        return list(cached_rows[:limit])
 
 
 def _iso_from_epoch(epoch: Optional[float]) -> Optional[str]:
