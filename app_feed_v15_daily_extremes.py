@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Meteo Arbus-Guspini backend v15 — daily temperature extremes.
+Meteo Arbus-Guspini backend v15.2 — daily temperature extremes.
 
 Estende il backend v14 senza modificare:
 - raccolta stazioni;
@@ -19,6 +19,11 @@ IMPORTANTE:
 le Tmin/Tmax osservate NON vengono ricostruite dagli slot previsionali
 08:00 / 14:00 / 20:00. Sono ricavate esclusivamente dai campioni realmente
 raccolti dal backend durante la giornata.
+
+FIX v15.2:
+- paginazione Supabase/PostgREST;
+- timestamp del filtro inviato in UTC con suffisso "Z", senza carattere "+"
+  nella query URL, così PostgREST non lo trasforma in uno spazio.
 """
 
 from __future__ import annotations
@@ -28,7 +33,6 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import HTTPException
 
-# Mantiene integralmente attivo il backend v14 già funzionante.
 from app_feed_v14_push_notifications import (
     api,
     STATIONS,
@@ -42,12 +46,14 @@ from app_feed_v14_push_notifications import (
 DAILY_EXTREMES_DEFAULT_DAYS = 14
 DAILY_EXTREMES_MAX_DAYS = 90
 DAILY_EXTREMES_MAX_ROWS = 5000
+DAILY_EXTREMES_PAGE_SIZE = 1000
 
 
 def _parse_datetime_utc(value: Any) -> Optional[datetime]:
     """Converte un timestamp ISO in datetime UTC timezone-aware."""
     if value is None:
         return None
+
     try:
         dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
     except Exception:
@@ -75,7 +81,13 @@ def _station_label(code: str, fallback: Any = None) -> str:
 
 
 def _fetch_station_observations(days: int) -> List[Dict[str, Any]]:
-    """Legge soltanto i campi necessari dall'archivio osservazioni."""
+    """
+    Legge soltanto i campi necessari dall'archivio osservazioni.
+
+    Supabase/PostgREST può imporre un massimo server-side di 1000 righe
+    per singola risposta. Per coprire davvero l'intera finestra richiesta,
+    leggiamo quindi l'archivio a pagine successive usando offset.
+    """
     now_local = datetime.now(ROME_TZ)
     first_local_day = now_local.date() - timedelta(days=days - 1)
 
@@ -84,18 +96,52 @@ def _fetch_station_observations(days: int) -> List[Dict[str, Any]]:
         datetime.min.time(),
         tzinfo=ROME_TZ,
     )
-    start_utc = start_local.astimezone(timezone.utc).isoformat()
 
-    rows = _supabase_request(
-        f"{STATION_OBSERVATIONS_TABLE}"
-        "?select=station_code,station_name,observed_at_utc,temperature_c"
-        f"&observed_at_utc=gte.{start_utc}"
-        "&order=observed_at_utc.asc"
-        f"&limit={DAILY_EXTREMES_MAX_ROWS}",
-        method="GET",
+    # FIX IMPORTANTE:
+    # nella query URL NON usiamo isoformat() con "+00:00".
+    # Il carattere "+" può essere decodificato come spazio.
+    # Usiamo sempre il formato UTC RFC3339 con suffisso Z.
+    start_utc = (
+        start_local
+        .astimezone(timezone.utc)
+        .strftime("%Y-%m-%dT%H:%M:%SZ")
     )
 
-    return rows if isinstance(rows, list) else []
+    all_rows: List[Dict[str, Any]] = []
+    offset = 0
+
+    while len(all_rows) < DAILY_EXTREMES_MAX_ROWS:
+        page_limit = min(
+            DAILY_EXTREMES_PAGE_SIZE,
+            DAILY_EXTREMES_MAX_ROWS - len(all_rows),
+        )
+
+        endpoint = (
+            f"{STATION_OBSERVATIONS_TABLE}"
+            "?select=station_code,station_name,observed_at_utc,temperature_c"
+            f"&observed_at_utc=gte.{start_utc}"
+            "&order=observed_at_utc.desc"
+            f"&limit={page_limit}"
+            f"&offset={offset}"
+        )
+
+        page = _supabase_request(
+            endpoint,
+            method="GET",
+        )
+
+        if not isinstance(page, list) or not page:
+            break
+
+        valid_rows = [row for row in page if isinstance(row, dict)]
+        all_rows.extend(valid_rows)
+
+        if len(page) < page_limit:
+            break
+
+        offset += len(page)
+
+    return all_rows
 
 
 def daily_station_extremes(
@@ -121,11 +167,7 @@ def daily_station_extremes(
     now_local = datetime.now(ROME_TZ)
     today_local = now_local.date()
 
-    # grouped[station_code][YYYY-MM-DD] = aggregato
     grouped: Dict[str, Dict[str, Dict[str, Any]]] = {}
-
-    # Conserviamo anche gli orari di tutti i campioni per valutare
-    # separatamente la copertura mattutina e pomeridiana.
     local_times: Dict[tuple[str, str], List[datetime]] = {}
 
     for row in rows:
@@ -201,10 +243,6 @@ def daily_station_extremes(
                     (last_dt - first_dt).total_seconds() / 3600.0,
                 )
 
-            # "complete" non pretende che ogni minuto sia campionato.
-            # Indica che, per un giorno ormai concluso, esistono campioni
-            # sia nella fascia in cui tipicamente cade Tmin sia in quella
-            # in cui tipicamente cade Tmax.
             tmin_complete = bool(final and early_morning_covered)
             tmax_complete = bool(final and afternoon_covered)
 
@@ -236,6 +274,8 @@ def daily_station_extremes(
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
         "days_requested": days,
         "rows_used": len(rows),
+        "page_size": DAILY_EXTREMES_PAGE_SIZE,
+        "max_rows": DAILY_EXTREMES_MAX_ROWS,
         "method": "prospective_station_archive_daily_min_max",
         "retroactive_forecast_reconstruction": False,
         "forecast_slots_used_as_observation": False,
@@ -248,7 +288,7 @@ def daily_station_extremes(
 def automation_observations_daily_extremes(
     days: int = DAILY_EXTREMES_DEFAULT_DAYS,
 ) -> Dict[str, Any]:
-    """Endpoint tecnico usato dalla v61 per l'audit degli estremi."""
+    """Endpoint tecnico usato dal frontend per l'audit degli estremi."""
     if not _cloud_configured():
         raise HTTPException(
             status_code=503,
@@ -269,7 +309,7 @@ def daily_extremes_alias(
     days: int = DAILY_EXTREMES_DEFAULT_DAYS,
 ) -> Dict[str, Any]:
     """
-    Alias semplice, utile anche per il test diretto da browser.
+    Alias semplice per il test diretto da browser.
 
     Esempio:
     /daily_extremes?days=14
@@ -277,7 +317,5 @@ def daily_extremes_alias(
     return automation_observations_daily_extremes(days=days)
 
 
-# Aggiorna soltanto le informazioni descrittive dell'istanza FastAPI.
-# Tutte le route v14 restano registrate e funzionanti.
-api.version = "15.0-daily-extremes"
+api.version = "15.2-daily-extremes-pagination-z"
 api.title = "Meteo Arbus-Guspini API"
