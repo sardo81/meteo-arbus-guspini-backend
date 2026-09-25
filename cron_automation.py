@@ -266,6 +266,18 @@ def main() -> int:
             args=[
                 "--disable-dev-shm-usage",
                 "--no-sandbox",
+                # Render Starter ha 512 MiB: riduce il footprint di Chromium,
+                # soprattutto nel run forecast_2130.
+                "--disable-gpu",
+                "--disable-extensions",
+                "--disable-background-networking",
+                "--disable-component-update",
+                "--disable-default-apps",
+                "--disable-sync",
+                "--no-first-run",
+                "--no-zygote",
+                "--renderer-process-limit=1",
+                "--js-flags=--max-old-space-size=128",
             ],
         )
 
