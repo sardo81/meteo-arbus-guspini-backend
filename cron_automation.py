@@ -8,9 +8,11 @@ eseguono il browser; gli altri avvii terminano subito.
 """
 from __future__ import annotations
 
+import gc
 import json
 import os
 import sys
+import resource
 from datetime import datetime, timedelta
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -113,6 +115,16 @@ def merge_meta(state: dict, run_key: str) -> dict:
     return state
 
 
+def memory_mb() -> float:
+    """RSS massimo del processo Python e dei figli, utile nei log Render."""
+    # Linux (Render): ru_maxrss e' espresso in KiB.
+    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
+
+
+def log_mem(stage: str) -> None:
+    print(f"MEM {stage} maxrss_mb={memory_mb():.1f}", flush=True)
+
+
 def main() -> int:
     now = datetime.now(ROME)
     slot, action = normalized_slot(now)
@@ -147,6 +159,7 @@ def main() -> int:
     cloud = http_json(
         f"{backend}/automation/state"
     )
+    log_mem("after_cloud_state")
 
     state = (
         cloud.get("state")
@@ -293,11 +306,24 @@ def main() -> int:
             lambda dialog: dialog.accept(),
         )
 
+        # Nei run operativi blocchiamo risorse puramente visuali: il Cron usa
+        # DOM + JavaScript, non immagini/font/media. Riduce RAM e banda senza
+        # cambiare il motore meteo o i dati scaricati via fetch/XHR.
+        def block_visual_resources(route):
+            if route.request.resource_type in {"image", "media", "font"}:
+                route.abort()
+            else:
+                route.continue_()
+
+        page.route("**/*", block_visual_resources)
+        log_mem("after_browser_start")
+
         page.goto(
             frontend,
             wait_until="domcontentloaded",
             timeout=120000,
         )
+        log_mem("after_page_load")
 
         # La sezione tecnica può essere chiusa: l'elemento deve solo esistere.
         page.wait_for_selector(
@@ -328,6 +354,7 @@ def main() -> int:
             wait_until="domcontentloaded",
             timeout=120000,
         )
+        log_mem("after_reload")
 
         page.wait_for_selector(
             "#forecastTime",
@@ -528,9 +555,11 @@ def main() -> int:
                     f"places={precheck.get('places')}"
                 )
 
+            log_mem(f"verify_{hour:02d}_before_stations")
             page.evaluate(
                 "async () => await loadStationObservations()"
             )
+            log_mem(f"verify_{hour:02d}_after_stations")
 
             station_status = (
                 page.locator("#status")
@@ -571,6 +600,7 @@ def main() -> int:
             page.evaluate(
                 "saveObservation()"
             )
+            log_mem(f"verify_{hour:02d}_after_save")
 
             save_status = (
                 page.locator("#status")
@@ -694,7 +724,10 @@ def main() -> int:
             })"""
         )
 
+        log_mem("before_browser_close")
         browser.close()
+        gc.collect()
+        log_mem("after_browser_close")
 
     # ---------------------------------------------------------
     # Mantiene i metadati cloud e marca lo slot completato
