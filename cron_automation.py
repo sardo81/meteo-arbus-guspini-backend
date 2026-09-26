@@ -754,6 +754,13 @@ def main() -> int:
         )
 
         log_mem("before_browser_close")
+
+        # Chiude esplicitamente pagina e context prima di Chromium. Su Render
+        # questo forza il rilascio dei renderer/network process prima della
+        # serializzazione/upload dello stato, evitando il picco OOM osservato
+        # subito dopo VERIFY. I dati sono già copiati in new_state.
+        page.close()
+        context.close()
         browser.close()
         gc.collect()
         log_mem("after_browser_close")
