@@ -433,17 +433,38 @@ def main() -> int:
 
             value = iso_local(target)
 
-            page.evaluate(
+            actual = page.evaluate(
                 """(value) => {
                     const e = document.getElementById('forecastTime');
                     if (!e) {
                         throw new Error('forecastTime non trovato');
                     }
+
+                    // Il change handler del frontend può ricalcolare usando lo
+                    // slot precedente. Emetti gli eventi, poi riafferma il
+                    // datetime richiesto prima di loadForecasts().
                     e.value = value;
                     e.dispatchEvent(new Event('input', {bubbles:true}));
                     e.dispatchEvent(new Event('change', {bubbles:true}));
+                    e.value = value;
+
+                    return {
+                        value: e.value,
+                        min: e.min || '',
+                        max: e.max || ''
+                    };
                 }""",
                 value,
+            )
+
+            if actual.get("value") != value:
+                raise RuntimeError(
+                    f"FORECAST_TIME_MISMATCH requested={value} actual={actual}"
+                )
+
+            print(
+                f"FORECAST_TIME requested={value} actual={actual}",
+                flush=True,
             )
 
             return value
@@ -462,8 +483,27 @@ def main() -> int:
                 # Ogni slot parte da un caricamento modelli pulito.
                 # Evita di mantenere in memoria gli array/modelli dello slot
                 # precedente, causa del picco oltre 512 MiB su Render.
-                page.evaluate(
-                    "async () => await loadForecasts()"
+                model_state = page.evaluate(
+                    """async (value) => {
+                        const e = document.getElementById('forecastTime');
+                        if (!e) throw new Error('forecastTime non trovato');
+
+                        // Ultima garanzia contro handler asincroni che abbiano
+                        // ripristinato lo slot corrente dopo set_time().
+                        e.value = value;
+                        await loadForecasts();
+
+                        return {
+                            forecastTime: e.value,
+                            status: document.getElementById('status')?.innerText || ''
+                        };
+                    }""",
+                    value,
+                )
+
+                print(
+                    f"MODEL_STATE {value} {model_state}",
+                    flush=True,
                 )
 
                 # archiveForecast() può essere invocato solo quando il
