@@ -473,30 +473,60 @@ def main() -> int:
                         "recalculate()"
                     )
 
-                page.evaluate(
-                    "archiveForecast()"
-                )
+                # archiveForecast() può essere invocato solo quando il
+                # caricamento/ricalcolo dei modelli ha davvero popolato i dati.
+                # In caso di sorgenti lente, attendiamo e ritentiamo il
+                # caricamento: i controlli d'integrità restano invariati.
+                expected_places = {"Arbus", "Guspini"}
+                archive_check = {}
 
-                archive_check = page.evaluate(
-                    """(value) => {
-                        const rows = JSON.parse(
-                            localStorage.getItem('meteoForecastArchiveV1') || '[]'
-                        );
-                        const same = rows.filter(
-                            x => x && x.validTime === value
-                        );
-                        const pending = same.filter(x => !x.verified);
-                        const places = [...new Set(
-                            pending.map(x => x.place).filter(Boolean)
-                        )].sort();
-                        return {
-                            total: same.length,
-                            pending: pending.length,
-                            places
-                        };
-                    }""",
-                    value,
-                )
+                for attempt in range(1, 4):
+                    page.wait_for_timeout(1500 if attempt == 1 else 4000)
+
+                    page.evaluate(
+                        "archiveForecast()"
+                    )
+
+                    archive_check = page.evaluate(
+                        """(value) => {
+                            const rows = JSON.parse(
+                                localStorage.getItem('meteoForecastArchiveV1') || '[]'
+                            );
+                            const same = rows.filter(
+                                x => x && x.validTime === value
+                            );
+                            const pending = same.filter(x => !x.verified);
+                            const places = [...new Set(
+                                pending.map(x => x.place).filter(Boolean)
+                            )].sort();
+                            return {
+                                total: same.length,
+                                pending: pending.length,
+                                places
+                            };
+                        }""",
+                        value,
+                    )
+
+                    got_places = set(archive_check.get("places") or [])
+                    if (
+                        int(archive_check.get("pending") or 0) >= 2
+                        and expected_places.issubset(got_places)
+                    ):
+                        break
+
+                    print(
+                        f"ARCHIVE_WAIT {value} attempt={attempt} "
+                        f"check={archive_check}"
+                    )
+
+                    if attempt < 3:
+                        # Ricarica esplicitamente i modelli per lo stesso
+                        # validTime. Non cambia modelli/calibrazione: concede
+                        # soltanto più tempo alle fetch asincrone.
+                        page.evaluate(
+                            "async () => await loadForecasts()"
+                        )
 
                 print(
                     f"ARCHIVE {value} "
@@ -505,7 +535,6 @@ def main() -> int:
                     f"check={archive_check}"
                 )
 
-                expected_places = {"Arbus", "Guspini"}
                 got_places = set(archive_check.get("places") or [])
                 if (
                     int(archive_check.get("pending") or 0) < 2
