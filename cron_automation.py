@@ -452,26 +452,19 @@ def main() -> int:
         # Scarica modelli e archivia previsione.
         # -----------------------------------------------------
         def load_models_and_archive(targets):
-            first = True
-
-            for hour, day_offset in targets:
+            for target_index, (hour, day_offset) in enumerate(targets):
                 value = set_time(
                     hour,
                     0,
                     day_offset,
                 )
 
-                if first:
-                    page.evaluate(
-                        "async () => await loadForecasts()"
-                    )
-
-                    first = False
-
-                else:
-                    page.evaluate(
-                        "recalculate()"
-                    )
+                # Ogni slot parte da un caricamento modelli pulito.
+                # Evita di mantenere in memoria gli array/modelli dello slot
+                # precedente, causa del picco oltre 512 MiB su Render.
+                page.evaluate(
+                    "async () => await loadForecasts()"
+                )
 
                 # archiveForecast() può essere invocato solo quando il
                 # caricamento/ricalcolo dei modelli ha davvero popolato i dati.
@@ -545,6 +538,41 @@ def main() -> int:
                         f"pending={archive_check.get('pending')} "
                         f"places={archive_check.get('places')}"
                     )
+
+                # Se ci sono altri slot nello stesso ciclo, ricarica la pagina:
+                # localStorage (archivio/storico) resta nel context, mentre heap
+                # JS, risposte fetch e strutture dei modelli vengono liberati.
+                if target_index < len(targets) - 1:
+                    log_mem(f"before_slot_reload_{hour:02d}")
+                    page.reload(
+                        wait_until="domcontentloaded",
+                        timeout=120000,
+                    )
+                    page.wait_for_selector(
+                        "#forecastTime",
+                        state="attached",
+                        timeout=30000,
+                    )
+                    if settings:
+                        page.evaluate(
+                            """(st) => {
+                                const set = (id, v) => {
+                                    const e = document.getElementById(id);
+                                    if (e && v !== null && v !== undefined) {
+                                        e.value = v;
+                                    }
+                                };
+                                set('stationApiUrl', st.stationApiUrl);
+                                for (const p of ['arbus', 'guspini']) {
+                                    set(`${p}-lat`, st[p]?.lat);
+                                    set(`${p}-lon`, st[p]?.lon);
+                                    set(`${p}-elev`, st[p]?.elev);
+                                }
+                            }""",
+                            settings,
+                        )
+                    gc.collect()
+                    log_mem(f"after_slot_reload_{hour:02d}")
 
         # -----------------------------------------------------
         # Verifica una previsione con le osservazioni reali.
