@@ -473,6 +473,10 @@ def main() -> int:
         # Scarica modelli e archivia previsione.
         # -----------------------------------------------------
         def load_models_and_archive(targets):
+            # La funzione riavvia Chromium tra gli slot e quindi riassegna
+            # questi oggetti creati nel blocco Playwright esterno.
+            nonlocal browser, context, page
+
             for target_index, (hour, day_offset) in enumerate(targets):
                 value = set_time(
                     hour,
