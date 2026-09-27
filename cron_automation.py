@@ -579,11 +579,81 @@ def main() -> int:
                         f"places={archive_check.get('places')}"
                     )
 
-                # Se ci sono altri slot nello stesso ciclo, ricarica la pagina:
-                # localStorage (archivio/storico) resta nel context, mentre heap
-                # JS, risposte fetch e strutture dei modelli vengono liberati.
+                # Se ci sono altri slot, salva lo stato e distrugge
+                # COMPLETAMENTE Chromium. Un page.reload() non libera in modo
+                # affidabile renderer/network process e sul piano 512 MiB può
+                # accumulare memoria fino all'OOM.
                 if target_index < len(targets) - 1:
-                    log_mem(f"before_slot_reload_{hour:02d}")
+                    slot_state = page.evaluate(
+                        """() => ({
+                            history: JSON.parse(
+                                localStorage.getItem('meteoHistoryV5') || '[]'
+                            ),
+                            archive: JSON.parse(
+                                localStorage.getItem('meteoForecastArchiveV1') || '[]'
+                            )
+                        })"""
+                    )
+
+                    log_mem(f"before_slot_browser_close_{hour:02d}")
+                    page.close()
+                    context.close()
+                    browser.close()
+                    gc.collect()
+                    log_mem(f"after_slot_browser_close_{hour:02d}")
+
+                    # Nuovo processo Chromium per lo slot successivo: nessun
+                    # heap/modello/fetch del precedente può restare residente.
+                    browser = p.chromium.launch(
+                        headless=True,
+                        args=[
+                            "--disable-dev-shm-usage",
+                            "--no-sandbox",
+                            "--disable-gpu",
+                            "--disable-extensions",
+                            "--disable-background-networking",
+                            "--disable-component-update",
+                            "--disable-default-apps",
+                            "--disable-sync",
+                            "--no-first-run",
+                            "--no-zygote",
+                            "--renderer-process-limit=1",
+                            "--js-flags=--max-old-space-size=128",
+                        ],
+                    )
+                    context = browser.new_context(
+                        timezone_id="Europe/Rome",
+                        locale="it-IT",
+                    )
+                    page = context.new_page()
+                    page.on("dialog", lambda dialog: dialog.accept())
+                    page.route("**/*", block_visual_resources)
+
+                    page.goto(
+                        frontend,
+                        wait_until="domcontentloaded",
+                        timeout=120000,
+                    )
+                    page.wait_for_selector(
+                        "#forecastTime",
+                        state="attached",
+                        timeout=30000,
+                    )
+
+                    # Ripristina history+archive prodotti dagli slot precedenti.
+                    page.evaluate(
+                        """(s) => {
+                            localStorage.setItem(
+                                'meteoHistoryV5',
+                                JSON.stringify(s.history || [])
+                            );
+                            localStorage.setItem(
+                                'meteoForecastArchiveV1',
+                                JSON.stringify(s.archive || [])
+                            );
+                        }""",
+                        slot_state,
+                    )
                     page.reload(
                         wait_until="domcontentloaded",
                         timeout=120000,
@@ -593,6 +663,7 @@ def main() -> int:
                         state="attached",
                         timeout=30000,
                     )
+
                     if settings:
                         page.evaluate(
                             """(st) => {
@@ -611,8 +682,9 @@ def main() -> int:
                             }""",
                             settings,
                         )
+
                     gc.collect()
-                    log_mem(f"after_slot_reload_{hour:02d}")
+                    log_mem(f"after_slot_browser_restart_{hour:02d}")
 
         # -----------------------------------------------------
         # Verifica una previsione con le osservazioni reali.
