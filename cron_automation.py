@@ -496,10 +496,17 @@ def main() -> int:
                         // ripristinato lo slot corrente dopo set_time().
                         e.value = value;
                         await loadForecasts();
-
+                        // Una fetch può fallire silenziosamente nel frontend.
+                        // Non archiviare finché entrambi i risultati non esistono.
                         return {
                             forecastTime: e.value,
-                            status: document.getElementById('status')?.innerText || ''
+                            status: document.getElementById('status')?.innerText || '',
+                            ready: Boolean(latestResults?.arbus && latestResults?.guspini),
+                            models: ['arbus','guspini'].map(p => ({
+                                place:p, gfs: Boolean(store[p]?.gfs),
+                                ecmwf: Boolean(store[p]?.ecmwf),
+                                result: Boolean(latestResults?.[p])
+                            }))
                         };
                     }""",
                     value,
@@ -520,9 +527,18 @@ def main() -> int:
                 for attempt in range(1, 4):
                     page.wait_for_timeout(1500 if attempt == 1 else 4000)
 
-                    page.evaluate(
-                        "archiveForecast()"
+                    // Il sync cloud asincrono non può cambiare lo slot operativo.
+                    // Ripristina la validità immediatamente prima dell'archivio.
+                    archive_status = page.evaluate(
+                        """(value) => {
+                            const e=document.getElementById('forecastTime');
+                            e.value=value;
+                            archiveForecast();
+                            return {time:e.value, status:document.getElementById('status')?.innerText || '',
+                              ready:Boolean(latestResults?.arbus && latestResults?.guspini)};
+                        }""", value
                     )
+                    print(f"ARCHIVE_ATTEMPT {value} {archive_status}", flush=True)
 
                     archive_check = page.evaluate(
                         """(value) => {
