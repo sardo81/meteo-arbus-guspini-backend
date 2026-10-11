@@ -147,6 +147,7 @@ def main() -> int:
         return 0
 
     frontend = env("FRONTEND_URL")
+    frontend_browser = frontend + ("&" if "?" in frontend else "?") + "automation=1"
     backend = env("BACKEND_URL")
     secret = env("AUTOMATION_SECRET") if action else ""
 
@@ -214,7 +215,7 @@ def main() -> int:
             page = context.new_page()
 
             page.goto(
-                frontend,
+                frontend_browser,
                 wait_until="domcontentloaded",
                 timeout=120000,
             )
@@ -310,7 +311,46 @@ def main() -> int:
         # DOM + JavaScript, non immagini/font/media. Riduce RAM e banda senza
         # cambiare il motore meteo o i dati scaricati via fetch/XHR.
         def block_visual_resources(route):
-            if route.request.resource_type in {"image", "media", "font"}:
+            # Isolamento SOLO per Chromium del Cron. Il sito pubblico resta
+            # identico; disattiviamo i timer di sync/download ridondanti che
+            # interferiscono con il caricamento esplicito dei modelli.
+            req = route.request
+            if (
+                req.resource_type == "document"
+                and req.url.split("?", 1)[0].rstrip("/")
+                == frontend.split("?", 1)[0].rstrip("/")
+            ):
+                response = route.fetch()
+                body = response.text()
+                if "if(!METEO_CRON_MODE){" not in body:
+                    start_marker = "\nregisterPwaServiceWorker();\nrenderPwaState();\n"
+                    end_marker = "\n</script>\n</body>"
+                    if body.count(start_marker) != 1 or body.count(end_marker) != 1:
+                        print("CRON_FRONTEND_MARKERS_MISSING", flush=True)
+                        route.abort()
+                        return
+                    body = body.replace(
+                        start_marker,
+                        "\nwindow.__meteoCronIsolated=true;\n"
+                        'if(new URLSearchParams(location.search).get("automation")!=="1"){\n'
+                        "registerPwaServiceWorker();\nrenderPwaState();\n",
+                        1,
+                    )
+                    body = body.replace(end_marker, "\n}" + end_marker, 1)
+                headers = {
+                    k: v for k, v in response.headers.items()
+                    if k.lower() not in {
+                        "content-length", "content-encoding", "etag",
+                        "last-modified", "transfer-encoding"
+                    }
+                }
+                route.fulfill(
+                    status=response.status,
+                    headers=headers,
+                    body=body,
+                )
+                return
+            if req.resource_type in {"image", "media", "font"}:
                 route.abort()
             else:
                 route.continue_()
@@ -319,7 +359,7 @@ def main() -> int:
         log_mem("after_browser_start")
 
         page.goto(
-            frontend,
+            frontend_browser,
             wait_until="domcontentloaded",
             timeout=120000,
         )
@@ -355,6 +395,13 @@ def main() -> int:
             timeout=120000,
         )
         log_mem("after_reload")
+        cron_isolated = page.evaluate(
+            "() => window.__meteoCronIsolated===true "
+            "|| (typeof METEO_CRON_MODE!=='undefined' && METEO_CRON_MODE===true)"
+        )
+        print(f"CRON_FRONTEND_ISOLATED {cron_isolated}", flush=True)
+        if not cron_isolated:
+            raise RuntimeError("CRON_FRONTEND_NOT_ISOLATED")
 
         page.wait_for_selector(
             "#forecastTime",
@@ -500,7 +547,7 @@ def main() -> int:
                         // Non archiviare finché entrambi i risultati non esistono.
                         return {
                             forecastTime: e.value,
-                            status: document.getElementById('status')?.innerText || '',
+                            status: document.getElementById('status')?.textContent || '',
                             ready: Boolean(latestResults?.arbus && latestResults?.guspini),
                             models: ['arbus','guspini'].map(p => ({
                                 place:p, gfs: Boolean(store[p]?.gfs),
@@ -534,7 +581,7 @@ def main() -> int:
                             const e=document.getElementById('forecastTime');
                             e.value=value;
                             archiveForecast();
-                            return {time:e.value, status:document.getElementById('status')?.innerText || '',
+                            return {time:e.value, status:document.getElementById('status')?.textContent || '',
                               ready:Boolean(latestResults?.arbus && latestResults?.guspini)};
                         }""", value
                     )
@@ -650,7 +697,7 @@ def main() -> int:
                     page.route("**/*", block_visual_resources)
 
                     page.goto(
-                        frontend,
+                        frontend_browser,
                         wait_until="domcontentloaded",
                         timeout=120000,
                     )
