@@ -160,7 +160,11 @@ def model_urls(settings):
 def install_routes(api, cloud_state_get):
     from fastapi import Header, HTTPException
     from fastapi.responses import Response
-    cache = SourceCache()
+    if os.getenv("METEO_MODEL_SOURCE", "") == "github-snapshot":
+        from snapshot_source import SnapshotSource
+        cache = SnapshotSource()
+    else:
+        cache = SourceCache()
 
     @api.post("/automation/models/fetch")
     def fetch_model(payload: dict, x_automation_secret: str | None = Header(default=None)):
