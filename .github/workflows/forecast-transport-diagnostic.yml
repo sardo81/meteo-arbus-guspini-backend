@@ -2,40 +2,93 @@ name: Forecast transport diagnostic
 on:
   push:
     branches: [repair/forecast-transport-20261011]
+    paths: ['model_transport.py', 'test_model_transport.py', '.github/workflows/forecast-transport-diagnostic.yml']
 permissions:
-  contents: read
+  contents: write
 jobs:
   inspect:
     runs-on: ubuntu-latest
-    timeout-minutes: 4
+    timeout-minutes: 6
     steps:
-      - name: Inspect public frontend and state without model requests or writes
+      - uses: actions/checkout@v4
+      - name: Apply minimal integration on repair branch only
         run: |
           python3 - <<'PY'
-          import urllib.request, json, re, hashlib, pathlib
-          def get(url):
-              with urllib.request.urlopen(url, timeout=45) as r:
-                  return r.read().decode('utf-8')
-          html=get('https://meteo-arbus-guspini.netlify.app/')
-          pathlib.Path('frontend.html').write_text(html)
-          print('FRONTEND_SHA256',hashlib.sha256(html.encode()).hexdigest())
-          lines=html.splitlines()
-          selected=set()
-          for i,line in enumerate(lines):
-              if re.search(r'open-meteo|async function loadForecasts|function fetchJson|function fetchGFS|function fetchECMWF|async function fetch|setInterval|METEO_CRON_MODE|function loadForecasts',line,re.I):
-                  selected.update(range(max(0,i-3),min(len(lines),i+32)))
-          for i in sorted(selected):
-              line=re.sub(r'((?:apikey|api_key|token|secret)\s*[:=]\s*[\x22\x27]?)[^\s\x22\x27&<>]+',r'\1REDACTED',lines[i],flags=re.I)
-              print(f'SRC {i+1}: {line[:1500]}')
-          base='https://meteo-arbus-guspini-api.onrender.com'
-          state=json.loads(get(base+'/automation/state'))
-          s=state.get('state',{})
-          print('STATE',json.dumps({'archive':len(s.get('archive',[])),'history':len(s.get('history',[])),'meta':s.get('automationMeta'),'settings':s.get('settings')},ensure_ascii=False))
-          spec=json.loads(get(base+'/openapi.json'))
-          print('ENDPOINTS',json.dumps(list(spec.get('paths',{}))))
+          import pathlib, hashlib, ast
+          p=pathlib.Path('cron_automation.py'); s=p.read_text()
+          if 'from model_transport import fulfil_cron_model' not in s:
+              blob=hashlib.sha1(b'blob '+str(len(s.encode())).encode()+b'\0'+s.encode()).hexdigest()
+              assert blob=='7bf24a39260d8d7b11a854d9414bfd54d05379a2',blob
+              a='from zoneinfo import ZoneInfo\n'
+              b='            req = route.request\n'
+              assert s.count(a)==1 and s.count(b)==1
+              s=s.replace(a,a+'from model_transport import fulfil_cron_model\n',1)
+              s=s.replace(b,b+'            if fulfil_cron_model(route, backend, secret):\n                return\n',1)
+              p.write_text(s)
+          for guard in ['ARCHIVE_INTEGRITY_FAIL','VERIFY_INTEGRITY_FAIL','STATIONS_NOT_READY','CRON_FRONTEND_NOT_ISOLATED','VERIFY_NO_ARCHIVED_FORECAST']:
+              assert guard in s,guard
+          p=pathlib.Path('app_feed_v15_daily_extremes.py'); s=p.read_text()
+          if 'install_routes as _install_model_routes' not in s:
+              blob=hashlib.sha1(b'blob '+str(len(s.encode())).encode()+b'\0'+s.encode()).hexdigest()
+              assert blob=='16bba73d10955180f6803bb3c30aebf8b92f0fc0',blob
+              s+='\n# Shared transport only: model calculations and all archives stay unchanged.\nfrom app_feed_v14_push_notifications import cloud_state_get as _model_cloud_state_get\nfrom model_transport import install_routes as _install_model_routes\n_install_model_routes(api, _model_cloud_state_get)\n'
+              p.write_text(s)
+          for f in pathlib.Path('.').glob('*.py'):ast.parse(f.read_text(),filename=str(f))
+          print('PYTHON_SYNTAX_AND_INTEGRITY_GUARDS PASS')
           PY
+      - name: Offline transport tests
+        run: python3 -m unittest -v test_model_transport.py
+      - name: Verify exact production model requests and real source responses
+        run: |
+          python3 - <<'PY'
+          import urllib.request,json,subprocess,pathlib,hashlib
+          from model_transport import model_urls,canonical_url,SourceCache,valid_payload
+          base='https://meteo-arbus-guspini-api.onrender.com'
+          def get(u):
+              with urllib.request.urlopen(u,timeout=60) as r:return r.read().decode()
+          html=get('https://meteo-arbus-guspini.netlify.app/')
+          state=json.loads(get(base+'/automation/state'))['state']
+          settings=state['settings']
+          js=html[html.index('function apiUrl('):html.index('function longRangeApiUrl(')]
+          js+='\nconst st='+json.dumps(settings)+'; const out=[]; for(const p of ["arbus","guspini"]){for(const m of ["gfs","ecmwf"])out.push(apiUrl(m,st[p].lat,st[p].lon,true));for(const m of ["gfs025","ecmwf_ifs025"])out.push(ensembleApiUrl(m,st[p].lat,st[p].lon));} console.log(JSON.stringify(out));'
+          actual=json.loads(subprocess.check_output(['node','-e',js]))
+          expected=list(model_urls(settings))
+          assert list(map(canonical_url,actual))==list(map(canonical_url,expected))
+          print('PRODUCTION_MODEL_URLS_UNCHANGED PASS count=8')
+          cache=SourceCache()
+          for u in actual:
+              code,body,headers=cache.get(u)
+              print('SOURCE_STATUS',code,headers)
+              if code==429:
+                  print('SOURCE_UNAVAILABLE: respecting provider cooldown; no more network requests')
+                  break
+              assert code==200,body[:300]
+              data=valid_payload(body)
+              print('SOURCE_TIME_AXIS',data['hourly']['time'][0],data['hourly']['time'][-1])
+              again=cache.get(u)
+              assert again[1]==body and again[2]['X-Meteo-Cache']=='HIT'
+          print('LIVE_SOURCE_SUMMARY',json.dumps(cache.status()))
+          print('STATE_READONLY',len(state.get('archive',[])),len(state.get('history',[])),state.get('automationMeta',{}).get('lastRun'))
+          print('FRONTEND_UNCHANGED_SHA256',hashlib.sha256(html.encode()).hexdigest())
+          PY
+      - name: Commit reviewed integration to repair branch
+        run: |
+          git config user.name 'MeteoArbus repair checks'
+          git config user.email '75302491+sardo81@users.noreply.github.com'
+          git add cron_automation.py app_feed_v15_daily_extremes.py
+          if ! git diff --cached --quiet; then
+            git diff --cached --stat
+            git commit -m 'Integrate tested shared model transport; preserve all archive integrity guards'
+            git push origin HEAD:repair/forecast-transport-20261011
+          fi
+          git rev-parse HEAD
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
-          name: forecast-frontend-source
-          path: frontend.html
-          retention-days: 2
+          name: tested-transport-source
+          path: |
+            model_transport.py
+            test_model_transport.py
+            cron_automation.py
+            app_feed_v15_daily_extremes.py
+          retention-days: 3
