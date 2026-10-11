@@ -1,0 +1,127 @@
+name: Prospective forecast recovery checks
+on:
+  push:
+    branches: [repair/forecast-transport-20261011]
+    paths: ['forecast_recovery.py', '.github/workflows/forecast-recovery-check.yml']
+permissions:
+  contents: write
+jobs:
+  recovery:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - name: Integrate date-bounded recovery without changing normal schedules
+        run: |
+          python3 - <<'PY'
+          import pathlib,ast
+          p=pathlib.Path('cron_automation.py'); s=p.read_text()
+          if 'def main(recovery_id:' not in s:
+              a='def main() -> int:'
+              b='    slot, action = normalized_slot(now)\n'
+              c='    cloud = http_json(\n'
+              assert s.count(a)==s.count(b)==s.count(c)==1
+              s=s.replace(a,'def main(recovery_id: str | None = None) -> int:',1)
+              s=s.replace(b,b+'\n    # Explicit recovery issues only tomorrow forecasts, at the real current time.\n    if recovery_id is not None:\n        if not isinstance(recovery_id, str) or not 1 <= len(recovery_id) <= 48 or not recovery_id.replace("-", "").isascii() or not recovery_id.replace("-", "").isalnum():\n            raise ValueError("Invalid recovery identifier")\n        slot, action = (now.hour, now.minute), "forecast_2130"\n',1)
+              s=s.replace(c,'    if recovery_id is not None:\n        run_key = f"{now.date().isoformat()}_recovery_{recovery_id}"\n        print(f"RECOVERY_PLAN {run_key} prospective_only=True issued_at={now.isoformat()}", flush=True)\n\n'+c,1)
+              p.write_text(s)
+          for guard in ['ARCHIVE_INTEGRITY_FAIL','VERIFY_INTEGRITY_FAIL','STATIONS_NOT_READY','CRON_FRONTEND_NOT_ISOLATED','VERIFY_NO_ARCHIVED_FORECAST']:
+              assert guard in s
+          p=pathlib.Path('app_feed_v15_daily_extremes.py');s=p.read_text()
+          if 'install_recovery as _install_recovery' not in s:
+              s+='\n# Recovery is disabled unless explicitly requested for the current local date.\nfrom forecast_recovery import install_recovery as _install_recovery\n_install_recovery(api)\n'
+              p.write_text(s)
+          for p in pathlib.Path('.').glob('*.py'):ast.parse(p.read_text(),filename=str(p))
+          print('RECOVERY_SYNTAX_AND_GUARDS PASS')
+          PY
+      - name: Test transport and recovery idempotence
+        run: |
+          python3 -m unittest -v test_model_transport.py
+          python3 - <<'PY'
+          import os
+          from datetime import datetime,timedelta
+          from zoneinfo import ZoneInfo
+          from unittest.mock import patch
+          from forecast_recovery import recovery_identifier
+          import cron_automation as cron
+          now=datetime.now(ZoneInfo('Europe/Rome'))
+          day=now.date().isoformat()
+          assert recovery_identifier(day+':test',now)=='test'
+          assert recovery_identifier((now-timedelta(days=1)).date().isoformat()+':test',now) is None
+          assert recovery_identifier('',now) is None
+          try:cron.main(recovery_id='bad;id')
+          except ValueError:pass
+          else:raise AssertionError('Unsafe ID accepted')
+          state={'state':{'automationMeta':{'completedRuns':[day+'_recovery_test']}}}
+          with patch.dict(os.environ,{'FRONTEND_URL':'https://example.test','BACKEND_URL':'https://example.test','AUTOMATION_SECRET':'offline-test'}), patch.object(cron,'http_json',return_value=state) as http:
+              assert cron.main(recovery_id='test')==0
+              assert http.call_count==1
+          print('RECOVERY_DATE_BOUND_IDEMPOTENCE PASS')
+          PY
+      - name: Install browser for end-to-end read-only test
+        run: |
+          python3 -m pip install playwright
+          python3 -m playwright install --with-deps chromium
+      - name: Execute complete Cron against real data without cloud writes
+        run: |
+          python3 -u - <<'PY'
+          import os,json,hashlib
+          from datetime import datetime,timedelta
+          from urllib.parse import urlsplit
+          import cron_automation as cron
+          import model_transport as transport
+          real_http=cron.http_json
+          base='https://meteo-arbus-guspini-api.onrender.com'
+          before=real_http(base+'/automation/state')['state']
+          captured={}
+          cache=transport.SourceCache()
+          def controlled_http(url,method='GET',payload=None,**kw):
+              if url.endswith('/automation/state'):
+                  if method=='GET':return {'state':json.loads(json.dumps(before))}
+                  assert method=='POST'
+                  captured.update(payload['state'])
+                  return {'status':'dry-run-no-cloud-write'}
+              if url.endswith('/automation/notifications/check'):
+                  return {}
+              raise AssertionError('Unexpected Cron request: '+url)
+          def controlled_route(route,backend,secret):
+              u=urlsplit(route.request.url)
+              if route.request.method not in ('GET','HEAD','OPTIONS'):
+                  raise AssertionError('Unexpected browser write blocked: '+u.path)
+              if (u.hostname,u.path) not in transport.ALLOWED:return False
+              code,body,headers=cache.get(route.request.url)
+              print('DRY_TRANSPORT',u.path,code,headers.get('X-Meteo-Cache'))
+              route.fulfill(status=code,body=body,headers={'Content-Type':'application/json','Access-Control-Allow-Origin':'*'})
+              return True
+          cron.http_json=controlled_http
+          cron.fulfil_cron_model=controlled_route
+          os.environ.update(FRONTEND_URL='https://meteo-arbus-guspini.netlify.app/',BACKEND_URL=base,AUTOMATION_SECRET='read-only-test',AUTOMATION_TEST='0')
+          started=datetime.now(cron.ROME).replace(second=0,microsecond=0)
+          assert cron.main(recovery_id='read-only-test')==0
+          assert captured['history']==before['history']
+          old={r['id']:r for r in before['archive']}
+          after={r['id']:r for r in captured['archive']}
+          assert all(after.get(k)==v for k,v in old.items())
+          new=[r for k,r in after.items() if k not in old]
+          assert len(new)==6,len(new)
+          tomorrow=(started+timedelta(days=1)).date().isoformat()
+          assert {(r['place'],r['validTime']) for r in new}=={(p,tomorrow+'T'+h) for p in ('Arbus','Guspini') for h in ('08:00','14:00','20:00')}
+          for row in new:
+              issue=datetime.fromisoformat(row['issueTime']).replace(tzinfo=cron.ROME)
+              valid=datetime.fromisoformat(row['validTime']).replace(tzinfo=cron.ROME)
+              assert issue>=started and valid>issue
+              print('PROSPECTIVE_ROW',json.dumps({k:row.get(k) for k in ('place','issueTime','validTime','gfs','ecmwf','localForecast','verified')}))
+          assert cache.upstream==8,cache.status()
+          assert cache.hits>=16,cache.status()
+          print('E2E_FORECAST PASS cloud_writes=0 historical_rows_unchanged=true new_prospective_rows=6',json.dumps(cache.status()))
+          PY
+      - name: Commit tested recovery integration to repair branch only
+        run: |
+          git config user.name 'MeteoArbus repair checks'
+          git config user.email '75302491+sardo81@users.noreply.github.com'
+          git add cron_automation.py app_feed_v15_daily_extremes.py
+          if ! git diff --cached --quiet; then
+            git commit -m 'Support audited date-bounded prospective recovery; preserve regular Cron integrity'
+            git push origin HEAD:repair/forecast-transport-20261011
+          fi
+          git rev-parse HEAD
