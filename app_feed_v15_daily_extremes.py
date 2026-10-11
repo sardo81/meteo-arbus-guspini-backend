@@ -324,3 +324,7 @@ api.title = "Meteo Arbus-Guspini API"
 from app_feed_v14_push_notifications import cloud_state_get as _model_cloud_state_get
 from model_transport import install_routes as _install_model_routes
 _install_model_routes(api, _model_cloud_state_get)
+
+# Recovery is disabled unless explicitly requested for the current local date.
+from forecast_recovery import install_recovery as _install_recovery
+_install_recovery(api)

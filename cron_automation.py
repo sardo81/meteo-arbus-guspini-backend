@@ -126,9 +126,15 @@ def log_mem(stage: str) -> None:
     print(f"MEM {stage} maxrss_mb={memory_mb():.1f}", flush=True)
 
 
-def main() -> int:
+def main(recovery_id: str | None = None) -> int:
     now = datetime.now(ROME)
     slot, action = normalized_slot(now)
+
+    # Explicit recovery issues only tomorrow forecasts, at the real current time.
+    if recovery_id is not None:
+        if not isinstance(recovery_id, str) or not 1 <= len(recovery_id) <= 48 or not recovery_id.replace("-", "").isascii() or not recovery_id.replace("-", "").isalnum():
+            raise ValueError("Invalid recovery identifier")
+        slot, action = (now.hour, now.minute), "forecast_2130"
 
     # Test manuale sicuro: abilitarlo con AUTOMATION_TEST=1.
     # Fuori dagli slot reali verifica Chromium + frontend + lettura cloud,
@@ -157,6 +163,10 @@ def main() -> int:
         if action
         else f"TEST_{now.strftime('%Y%m%d_%H%M%S')}"
     )
+
+    if recovery_id is not None:
+        run_key = f"{now.date().isoformat()}_recovery_{recovery_id}"
+        print(f"RECOVERY_PLAN {run_key} prospective_only=True issued_at={now.isoformat()}", flush=True)
 
     cloud = http_json(
         f"{backend}/automation/state"
