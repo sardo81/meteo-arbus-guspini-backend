@@ -1,0 +1,106 @@
+name: Meteo exact model snapshots
+on:
+  push:
+    branches: [main, fix/meteo-api-20261011]
+    paths: ['snapshot_source.py', 'capture_model_snapshot.py', 'test_snapshot_source.py', '.github/workflows/meteo-model-snapshot.yml']
+  schedule:
+    - cron: '10 8,9,13,14,19,20 * * *'
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: meteo-model-snapshot
+  cancel-in-progress: false
+jobs:
+  capture:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Keep the three Italian forecast cycles across daylight saving changes
+        id: gate
+        run: |
+          python3 - <<'PY'
+          import os
+          from datetime import datetime
+          from zoneinfo import ZoneInfo
+          allowed = os.environ['GITHUB_EVENT_NAME'] != 'schedule' or datetime.now(ZoneInfo('Europe/Rome')).hour in (10,15,21)
+          with open(os.environ['GITHUB_OUTPUT'],'a') as f: f.write('run='+str(allowed).lower()+'\n')
+          PY
+      - uses: actions/checkout@v4
+        if: steps.gate.outputs.run == 'true'
+      - name: Apply only the opt-in transport selection
+        if: steps.gate.outputs.run == 'true'
+        run: |
+          python3 - <<'PY'
+          import pathlib, ast, hashlib
+          p=pathlib.Path('model_transport.py'); s=p.read_text()
+          if 'from snapshot_source import SnapshotSource' not in s:
+              blob=hashlib.sha1(b'blob '+str(len(s.encode())).encode()+b'\0'+s.encode()).hexdigest()
+              assert blob=='998ff72dc3d75e319a54973399e3000cda9950fe',blob
+              anchor='    cache = SourceCache()\n'
+              assert s.count(anchor)==1
+              s=s.replace(anchor,'    if os.getenv("METEO_MODEL_SOURCE", "") == "github-snapshot":\n        from snapshot_source import SnapshotSource\n        cache = SnapshotSource()\n    else:\n        cache = SourceCache()\n',1)
+              p.write_text(s)
+          for p in pathlib.Path('.').glob('*.py'): ast.parse(p.read_text(),filename=str(p))
+          cron=pathlib.Path('cron_automation.py').read_text()
+          for guard in ['ARCHIVE_INTEGRITY_FAIL','VERIFY_INTEGRITY_FAIL','STATIONS_NOT_READY','CRON_FRONTEND_NOT_ISOLATED','VERIFY_NO_ARCHIVED_FORECAST']:
+              assert guard in cron,guard
+          print('PYTHON_SYNTAX_PASS INTEGRITY_GUARDS_PRESERVED')
+          PY
+      - name: Test exact bytes, freshness, tampering, source allowlist and request bounds
+        if: steps.gate.outputs.run == 'true'
+        run: python3 -m unittest -v test_model_transport.py test_snapshot_source.py
+      - name: Compare all source URLs against the live frontend
+        if: steps.gate.outputs.run == 'true'
+        run: |
+          python3 - <<'PY'
+          import urllib.request,json,subprocess
+          from model_transport import model_urls,canonical_url
+          def get(url):
+              with urllib.request.urlopen(url,timeout=45) as r:return r.read().decode()
+          html=get('https://meteo-arbus-guspini.netlify.app/')
+          st=json.loads(get('https://meteo-arbus-guspini-api.onrender.com/automation/state'))['state']['settings']
+          js=html[html.index('function apiUrl('):html.index('function longRangeApiUrl(')]
+          js+='\nconst st='+json.dumps(st)+';const out=[];for(const p of ["arbus","guspini"]){for(const m of ["gfs","ecmwf"])out.push(apiUrl(m,st[p].lat,st[p].lon,true));for(const m of ["gfs025","ecmwf_ifs025"])out.push(ensembleApiUrl(m,st[p].lat,st[p].lon));}console.log(JSON.stringify(out));'
+          urls=json.loads(subprocess.check_output(['node','-e',js]))
+          assert list(map(canonical_url,urls))==list(map(canonical_url,model_urls(st)))
+          print('PRODUCTION_MODELS_AND_PARAMETERS_IDENTICAL PASS requests=8')
+          PY
+      - name: Capture one complete set of current source responses
+        if: steps.gate.outputs.run == 'true'
+        run: python3 capture_model_snapshot.py snapshot-output
+      - name: Atomically publish source data on the dedicated data branch
+        if: steps.gate.outputs.run == 'true'
+        run: |
+          git fetch --depth=1 origin meteo-model-data
+          git worktree add --detach "$RUNNER_TEMP/meteo-model-data" FETCH_HEAD
+          cp snapshot-output/model-snapshot.json.gz snapshot-output/model-snapshot-manifest.json "$RUNNER_TEMP/meteo-model-data/"
+          git -C "$RUNNER_TEMP/meteo-model-data" config user.name 'MeteoArbus source collector'
+          git -C "$RUNNER_TEMP/meteo-model-data" config user.email '75302491+sardo81@users.noreply.github.com'
+          git -C "$RUNNER_TEMP/meteo-model-data" add model-snapshot.json.gz model-snapshot-manifest.json
+          git -C "$RUNNER_TEMP/meteo-model-data" commit -m 'Capture current unmodified Open-Meteo responses; no forecast archive writes'
+          git -C "$RUNNER_TEMP/meteo-model-data" push origin HEAD:meteo-model-data
+          echo SOURCE_SNAPSHOT_PUBLISHED
+      - name: Commit tested opt-in integration
+        if: steps.gate.outputs.run == 'true'
+        run: |
+          git config user.name 'MeteoArbus repair checks'
+          git config user.email '75302491+sardo81@users.noreply.github.com'
+          git add model_transport.py
+          if ! git diff --cached --quiet; then
+            git diff --cached --stat
+            git commit -m 'Use validated exact source snapshots when explicitly enabled'
+            git push origin "HEAD:$GITHUB_REF_NAME"
+          fi
+          git rev-parse HEAD
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.gate.outputs.run == 'true'
+        with:
+          name: tested-model-snapshot
+          path: |
+            snapshot-output/
+            snapshot_source.py
+            capture_model_snapshot.py
+            test_snapshot_source.py
+            model_transport.py
+          retention-days: 3
