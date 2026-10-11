@@ -1,0 +1,46 @@
+name: Read-only forecast state audit
+on:
+  push:
+    branches: [repair/forecast-transport-20261011]
+    paths: ['.github/workflows/forecast-state-audit.yml']
+permissions:
+  contents: read
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - name: Read and hash cloud forecast state, then check station sources
+        run: |
+          python3 -u - <<'PY'
+          import urllib.request,json,hashlib,datetime,pathlib
+          base='https://meteo-arbus-guspini-api.onrender.com'
+          def get(path):
+              with urllib.request.urlopen(base+path,timeout=180) as r:return json.load(r)
+          def digest(value):
+              return hashlib.sha256(json.dumps(value,sort_keys=True,separators=(',',':'),ensure_ascii=False).encode()).hexdigest()
+          state=get('/automation/state')['state']
+          historical=sorted([r for r in state.get('archive',[]) if str(r.get('validTime',''))<'2026-10-12'],key=lambda r:str(r.get('id')))
+          meta=state.get('automationMeta',{})
+          report={'captured_at_utc':datetime.datetime.now(datetime.timezone.utc).isoformat(),'archive_count':len(state.get('archive',[])),'history_count':len(state.get('history',[])),'history_sha256':digest(state.get('history',[])),'prior_archive_count':len(historical),'prior_archive_sha256':digest(historical),'lastRun':meta.get('lastRun'),'lastSuccessAt':meta.get('lastSuccessAt'),'completed_oct11':[x for x in meta.get('completedRuns',[]) if x.startswith('2026-10-11')],'prospective_rows':[{k:r.get(k) for k in ('id','place','issueTime','validTime','gfs','ecmwf','localForecast','verified')} for r in state.get('archive',[]) if str(r.get('validTime','')).startswith('2026-10-12')]}
+          print('CLOUD_AUDIT',json.dumps(report,ensure_ascii=False))
+          for path,key in [('/automation/models/status','transport'),('/stations','stations')]:
+              try:report[key]=get(path)
+              except Exception as e:report[key]={'error':str(e)}
+              print(key.upper(),json.dumps(report[key],ensure_ascii=False))
+          try:
+              rows=get('/automation/observations/recent?limit=5000').get('observations',[])
+              latest={}
+              for row in rows:
+                  code=row.get('station_code')
+                  if code not in latest or str(row.get('observed_at_utc',''))>str(latest[code].get('observed_at_utc','')):latest[code]=row
+              report['latest_archived_observations']={k:{f:v.get(f) for f in ('station_code','station_name','observed_at_utc','temperature_c','source')} for k,v in latest.items()}
+              print('LATEST_REAL_OBSERVATIONS',json.dumps(report['latest_archived_observations'],ensure_ascii=False))
+          except Exception as e:report['observation_error']=str(e)
+          pathlib.Path('audit.json').write_text(json.dumps(report,ensure_ascii=False,indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: forecast-state-audit
+          path: audit.json
+          retention-days: 7
