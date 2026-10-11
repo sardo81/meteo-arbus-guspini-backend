@@ -1,0 +1,64 @@
+name: Meteo read-only diagnostics
+on:
+  push:
+    branches: [fix/meteo-api-20261011]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Inspect public sources without running forecasts or writing state
+        env:
+          REVISION: ${{ github.sha }}
+        run: |
+          python3 - <<'PY'
+          import ast, hashlib, json, os, pathlib, re
+          from urllib.request import Request, urlopen
+          out = pathlib.Path('diagnostics')
+          out.mkdir(exist_ok=True)
+          def get(url):
+              req = Request(url, headers={'User-Agent': 'MeteoArbus-readonly-diagnostics/1.0'})
+              with urlopen(req, timeout=40) as r:
+                  return r.read().decode('utf-8')
+          root = 'https://raw.githubusercontent.com/sardo81/meteo-arbus-guspini-backend/' + os.environ['REVISION'] + '/'
+          cron = get(root + 'cron_automation.py')
+          ast.parse(cron)
+          print('PYTHON_SYNTAX_PASS cron_automation.py')
+          (out / 'cron_automation.py').write_text(cron)
+          html = get('https://meteo-arbus-guspini.netlify.app/')
+          (out / 'frontend.html').write_text(html)
+          print('FRONTEND_SHA256', hashlib.sha256(html.encode()).hexdigest(), 'bytes', len(html))
+          lines = html.splitlines()
+          chosen = set()
+          for i, line in enumerate(lines):
+              if re.search(r'function\s+(loadForecasts|fetchModel|fetchJson|fetchJSON|loadModel)|open-meteo\.com|setInterval|loadForecasts\(\)|forecast_days|METEO_CRON_MODE', line):
+                  span = 100 if re.search(r'function\s+(loadForecasts|fetchModel|fetchJson|fetchJSON|loadModel)', line) else 8
+                  chosen.update(range(max(0, i-3), min(len(lines), i+span)))
+          for i in sorted(chosen):
+              line = re.sub(r'(?i)(apikey|api_key|token|secret)([=:\s\"\x27]+)[A-Za-z0-9._-]{20,}', r'\1\2[REDACTED]', lines[i])
+              print('SOURCE', i+1, line[:5000])
+          for name in ['app_feed_v14_push_notifications.py', 'app_feed_v15_daily_extremes.py']:
+              code = get(root + name)
+              (out / name).write_text(code)
+              for i, line in enumerate(code.splitlines()):
+                  if re.search(r'@api\.|open-meteo|from app_', line):
+                      print('BACKEND_ROUTE', name, i+1, line[:300])
+          try:
+              data = json.loads(get('https://meteo-arbus-guspini-api.onrender.com/automation/state'))
+              state = data.get('state', {})
+              summary = {'archive_count': len(state.get('archive', [])), 'history_count': len(state.get('history', [])), 'automationMeta': state.get('automationMeta'), 'future_rows': [{'place': x.get('place'), 'validTime': x.get('validTime'), 'issuedAt': x.get('issuedAt'), 'createdAt': x.get('createdAt')} for x in state.get('archive', []) if str(x.get('validTime', '')) >= '2026-10-11']}
+              print('STATE_SUMMARY', json.dumps(summary))
+              (out / 'state_summary.json').write_text(json.dumps(summary, indent=2))
+          except Exception as exc:
+              print('STATE_READ_FAIL', type(exc).__name__, str(exc)[:160])
+          print('READONLY_DIAGNOSTICS_DONE no_forecasts_created no_cloud_writes')
+          PY
+      - name: Retain public source snapshot for debugging
+        uses: actions/upload-artifact@v4
+        with:
+          name: meteo-readonly-snapshot
+          path: diagnostics/
+          retention-days: 1
