@@ -621,11 +621,22 @@ def main() -> int:
                     )
 
                     if attempt < 3:
-                        # Ricarica esplicitamente i modelli per lo stesso
-                        # validTime. Non cambia modelli/calibrazione: concede
-                        # soltanto più tempo alle fetch asincrone.
-                        page.evaluate(
-                            "async () => await loadForecasts()"
+                        # Riprova mantenendo la stessa validità prospettica.
+                        retry_state = page.evaluate(
+                            """async (value) => {
+                                document.getElementById('forecastTime').value=value;
+                                await loadForecasts();
+                                return {
+                                  ready:Boolean(latestResults?.arbus && latestResults?.guspini),
+                                  status:document.getElementById('status')?.textContent || ''
+                                };
+                            }""",
+                            value,
+                        )
+                        print(
+                            f"MODEL_RETRY {value} attempt={attempt} "
+                            f"{retry_state}",
+                            flush=True,
                         )
 
                 print(
@@ -792,15 +803,44 @@ def main() -> int:
                 )
 
             log_mem(f"verify_{hour:02d}_before_stations")
-            page.evaluate(
-                "async () => await loadStationObservations()"
-            )
+            station_result = {}
+            for obs_attempt in range(1, 4):
+                station_result = page.evaluate(
+                    """async (value) => {
+                        const e=document.getElementById('forecastTime');
+                        e.value=value;
+                        await loadStationObservations();
+                        const obs={};
+                        for(const p of ['arbus','guspini']){
+                            obs[p]=document.getElementById(p+'-obs-temp')?.value || '';
+                        }
+                        return {
+                            time:e.value,
+                            status:document.getElementById('status')?.textContent || '',
+                            observations:obs,
+                            ready:['arbus','guspini'].every(p =>
+                                obs[p]!=='' && Number.isFinite(Number(obs[p]))
+                            )
+                        };
+                    }""",
+                    value,
+                )
+                print(
+                    f"STATION_ATTEMPT {value} attempt={obs_attempt} "
+                    f"{station_result}",
+                    flush=True,
+                )
+                if station_result.get("ready"):
+                    break
+                if obs_attempt < 3:
+                    page.wait_for_timeout(4000)
             log_mem(f"verify_{hour:02d}_after_stations")
-
-            station_status = (
-                page.locator("#status")
-                .inner_text()
-            )
+            station_status = station_result.get("status") or ""
+            if not station_result.get("ready"):
+                raise RuntimeError(
+                    f"STATIONS_NOT_READY {value}: "
+                    f"{station_status[:250]}"
+                )
 
             # loadStationObservations() sincronizza nuovamente il cloud.
             # Ricontrolliamo l'archivio dopo quella sincronizzazione: se i
@@ -838,10 +878,7 @@ def main() -> int:
             )
             log_mem(f"verify_{hour:02d}_after_save")
 
-            save_status = (
-                page.locator("#status")
-                .inner_text()
-            )
+            save_status = page.locator("#status").text_content() or ""
 
             postcheck = page.evaluate(
                 """(value) => {
