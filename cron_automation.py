@@ -564,6 +564,16 @@ def main() -> int:
                     flush=True,
                 )
 
+                # HTTP 429 con quota giornaliera: ulteriori fetch non possono
+                # recuperare i modelli. Non creare né archiviare previsioni.
+                if "daily api request limit exceeded" in (
+                    model_state.get("status") or ""
+                ).lower():
+                    raise RuntimeError(
+                        f"MODEL_SOURCE_QUOTA_EXCEEDED {value}: "
+                        "HTTP 429, interrotti i tentativi inutili"
+                    )
+
                 # archiveForecast() può essere invocato solo quando il
                 # caricamento/ricalcolo dei modelli ha davvero popolato i dati.
                 # In caso di sorgenti lente, attendiamo e ritentiamo il
@@ -638,6 +648,13 @@ def main() -> int:
                             f"{retry_state}",
                             flush=True,
                         )
+                        if "daily api request limit exceeded" in (
+                            retry_state.get("status") or ""
+                        ).lower():
+                            raise RuntimeError(
+                                f"MODEL_SOURCE_QUOTA_EXCEEDED {value}: "
+                                "HTTP 429, interrotti i tentativi inutili"
+                            )
 
                 print(
                     f"ARCHIVE {value} "
