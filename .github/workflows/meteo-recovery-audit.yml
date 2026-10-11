@@ -1,0 +1,68 @@
+name: Meteo recovery read-only audit
+on:
+  push:
+    branches: [fix/meteo-api-20261011]
+    paths: ['.github/workflows/meteo-recovery-audit.yml']
+permissions:
+  contents: read
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Compare state before and after the real Render recovery
+        run: |
+          python3 - <<'PY'
+          import collections,hashlib,json,pathlib,time
+          from datetime import datetime,timezone
+          from zoneinfo import ZoneInfo
+          from urllib.request import urlopen
+          base='https://meteo-arbus-guspini-api.onrender.com'
+          out=pathlib.Path('audit');out.mkdir()
+          def get(path,timeout=45):
+              with urlopen(base+path,timeout=timeout) as r:return json.load(r)
+          def digest(value):return hashlib.sha256(json.dumps(value,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+          before=get('/automation/state')['state']
+          print('BEFORE',len(before.get('archive',[])),len(before.get('history',[])),before.get('automationMeta',{}).get('lastRun'),flush=True)
+          (out/'before.json').write_text(json.dumps(before))
+          after=before
+          wanted='2026-10-11_recovery_github-source-fix'
+          for attempt in range(30):
+              after=get('/automation/state')['state']
+              if wanted in after.get('automationMeta',{}).get('completedRuns',[]):break
+              time.sleep(8)
+          rows=[x for x in after.get('archive',[]) if str(x.get('validTime','')).startswith('2026-10-12T')]
+          expected={(p,'2026-10-12T'+h) for p in ('Arbus','Guspini') for h in ('08:00','14:00','20:00')}
+          got={(x.get('place'),x.get('validTime')) for x in rows}
+          def prospective(row):
+              issue=datetime.fromisoformat(row['issueTime'].replace('Z','+00:00'))
+              if issue.tzinfo is None:issue=issue.replace(tzinfo=ZoneInfo('Europe/Rome'))
+              valid=datetime.fromisoformat(row['validTime']).replace(tzinfo=ZoneInfo('Europe/Rome'))
+              return issue<valid and not row.get('verified')
+          old=collections.Counter(digest(x) for x in before.get('archive',[]))
+          new=collections.Counter(digest(x) for x in after.get('archive',[]))
+          report={'checked_at':datetime.now(timezone.utc).isoformat(),'completed_recovery':wanted in after.get('automationMeta',{}).get('completedRuns',[]),'archive_before':len(before.get('archive',[])),'archive_after':len(after.get('archive',[])),'history_before':len(before.get('history',[])),'history_after':len(after.get('history',[])),'history_unchanged':digest(before.get('history'))==digest(after.get('history')),'existing_archive_rows_unchanged':not bool(old-new),'all_six_future_rows_present':expected.issubset(got),'all_rows_prospective':bool(rows) and all(prospective(x) for x in rows),'rows':[{k:x.get(k) for k in ('id','place','issueTime','validTime','leadHours','gfs','ecmwf','localForecast','verified')} for x in rows],'automationMeta':after.get('automationMeta'),'model_source':get('/automation/models/status')}
+          (out/'after.json').write_text(json.dumps(after))
+          (out/'report.json').write_text(json.dumps(report,indent=2))
+          print('AUDIT_REPORT',json.dumps(report),flush=True)
+          for name,path,timeout in [('stations','/stations',120),('observations','/automation/observations/recent?limit=300',60)]:
+              try:
+                  result=get(path,timeout)
+                  (out/(name+'.json')).write_text(json.dumps(result,indent=2))
+                  if name=='stations':print('REAL_STATIONS',json.dumps(result),flush=True)
+                  else:
+                      latest={}
+                      for row in result.get('observations',[]):
+                          code=row.get('station_code')
+                          if code and code not in latest:latest[code]=row
+                      print('LATEST_REAL_OBSERVATIONS',json.dumps(latest),flush=True)
+              except Exception as exc:print('STATION_SOURCE_UNAVAILABLE',name,type(exc).__name__,str(exc)[:200],flush=True)
+          if not all(report[k] for k in ['completed_recovery','history_unchanged','existing_archive_rows_unchanged','all_six_future_rows_present','all_rows_prospective']):raise SystemExit('RECOVERY_AUDIT_FAIL')
+          print('RECOVERY_AUDIT_PASS no_retroactive_data no_history_modifications',flush=True)
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: meteo-recovery-proof
+          path: audit/
+          retention-days: 3
