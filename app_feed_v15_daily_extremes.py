@@ -319,3 +319,8 @@ def daily_extremes_alias(
 
 api.version = "15.2-daily-extremes-pagination-z"
 api.title = "Meteo Arbus-Guspini API"
+
+# Shared transport only: model calculations and all archives stay unchanged.
+from app_feed_v14_push_notifications import cloud_state_get as _model_cloud_state_get
+from model_transport import install_routes as _install_model_routes
+_install_model_routes(api, _model_cloud_state_get)

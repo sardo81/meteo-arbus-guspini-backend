@@ -17,6 +17,7 @@ from datetime import datetime, timedelta
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
+from model_transport import fulfil_cron_model
 
 ROME = ZoneInfo("Europe/Rome")
 TARGETS = {
@@ -315,6 +316,8 @@ def main() -> int:
             # identico; disattiviamo i timer di sync/download ridondanti che
             # interferiscono con il caricamento esplicito dei modelli.
             req = route.request
+            if fulfil_cron_model(route, backend, secret):
+                return
             if (
                 req.resource_type == "document"
                 and req.url.split("?", 1)[0].rstrip("/")
