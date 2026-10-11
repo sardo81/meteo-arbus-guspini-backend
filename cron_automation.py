@@ -527,8 +527,8 @@ def main() -> int:
                 for attempt in range(1, 4):
                     page.wait_for_timeout(1500 if attempt == 1 else 4000)
 
-                    // Il sync cloud asincrono non può cambiare lo slot operativo.
-                    // Ripristina la validità immediatamente prima dell'archivio.
+                    # Il sync cloud asincrono non può cambiare lo slot operativo.
+                    # Ripristina la validità immediatamente prima dell'archivio.
                     archive_status = page.evaluate(
                         """(value) => {
                             const e=document.getElementById('forecastTime');
