@@ -285,6 +285,8 @@ def main(recovery_id: str | None = None) -> int:
         else {}
     )
 
+    verification_report = None
+
     with sync_playwright() as p:
         browser = p.chromium.launch(
             headless=True,
@@ -798,174 +800,12 @@ def main(recovery_id: str | None = None) -> int:
         # Verifica una previsione con le osservazioni reali.
         # -----------------------------------------------------
         def verify(hour: int):
+            nonlocal verification_report
+            from station_verification import verify_independent
             value = set_time(hour)
-
-            # Prima di leggere le osservazioni, la previsione prospettica
-            # deve esistere davvero nell'archivio per entrambe le localita'.
-            # In caso contrario NON consentiamo il fallback del frontend a
-            # un confronto immediato, che falserebbe il significato di DONE.
-            precheck = page.evaluate(
-                """(value) => {
-                    const rows = JSON.parse(
-                        localStorage.getItem('meteoForecastArchiveV1') || '[]'
-                    );
-                    const same = rows.filter(
-                        x => x && x.validTime === value && !x.verified
-                    );
-                    const places = [...new Set(
-                        same.map(x => x.place).filter(Boolean)
-                    )].sort();
-                    return {pending: same.length, places};
-                }""",
-                value,
-            )
-
-            expected_places = {"Arbus", "Guspini"}
-            pre_places = set(precheck.get("places") or [])
-            if (
-                int(precheck.get("pending") or 0) < 2
-                or not expected_places.issubset(pre_places)
-            ):
-                raise RuntimeError(
-                    f"VERIFY_NO_ARCHIVED_FORECAST {value}: "
-                    f"pending={precheck.get('pending')} "
-                    f"places={precheck.get('places')}"
-                )
-
-            log_mem(f"verify_{hour:02d}_before_stations")
-            station_result = {}
-            for obs_attempt in range(1, 4):
-                station_result = page.evaluate(
-                    """async (value) => {
-                        const e=document.getElementById('forecastTime');
-                        e.value=value;
-                        await loadStationObservations();
-                        const obs={};
-                        for(const p of ['arbus','guspini']){
-                            obs[p]=document.getElementById(p+'-obs-temp')?.value || '';
-                        }
-                        return {
-                            time:e.value,
-                            status:document.getElementById('status')?.textContent || '',
-                            observations:obs,
-                            ready:['arbus','guspini'].every(p =>
-                                obs[p]!=='' && Number.isFinite(Number(obs[p]))
-                            )
-                        };
-                    }""",
-                    value,
-                )
-                print(
-                    f"STATION_ATTEMPT {value} attempt={obs_attempt} "
-                    f"{station_result}",
-                    flush=True,
-                )
-                if station_result.get("ready"):
-                    break
-                if obs_attempt < 3:
-                    page.wait_for_timeout(4000)
-            log_mem(f"verify_{hour:02d}_after_stations")
-            station_status = station_result.get("status") or ""
-            if not station_result.get("ready"):
-                raise RuntimeError(
-                    f"STATIONS_NOT_READY {value}: "
-                    f"{station_status[:250]}"
-                )
-
-            # loadStationObservations() sincronizza nuovamente il cloud.
-            # Ricontrolliamo l'archivio dopo quella sincronizzazione: se i
-            # record sparissero durante il refresh, fermiamo il run prima di
-            # salvare confronti non prospettici.
-            synced_precheck = page.evaluate(
-                """(value) => {
-                    const rows = JSON.parse(
-                        localStorage.getItem('meteoForecastArchiveV1') || '[]'
-                    );
-                    const same = rows.filter(
-                        x => x && x.validTime === value && !x.verified
-                    );
-                    const places = [...new Set(
-                        same.map(x => x.place).filter(Boolean)
-                    )].sort();
-                    return {pending: same.length, places};
-                }""",
-                value,
-            )
-
-            synced_places = set(synced_precheck.get("places") or [])
-            if (
-                int(synced_precheck.get("pending") or 0) < 2
-                or not expected_places.issubset(synced_places)
-            ):
-                raise RuntimeError(
-                    f"VERIFY_ARCHIVE_LOST_AFTER_SYNC {value}: "
-                    f"pending={synced_precheck.get('pending')} "
-                    f"places={synced_precheck.get('places')}"
-                )
-
-            page.evaluate(
-                "saveObservation()"
-            )
-            log_mem(f"verify_{hour:02d}_after_save")
-
-            save_status = page.locator("#status").text_content() or ""
-
-            postcheck = page.evaluate(
-                """(value) => {
-                    const history = JSON.parse(
-                        localStorage.getItem('meteoHistoryV5') || '[]'
-                    );
-                    const archive = JSON.parse(
-                        localStorage.getItem('meteoForecastArchiveV1') || '[]'
-                    );
-                    const h = history.filter(
-                        x => x && x.source === 'archive' && x.when === value
-                    );
-                    const a = archive.filter(
-                        x => x && x.validTime === value && x.verified
-                    );
-                    const historyPlaces = [...new Set(
-                        h.map(x => x.place).filter(Boolean)
-                    )].sort();
-                    const archivePlaces = [...new Set(
-                        a.map(x => x.place).filter(Boolean)
-                    )].sort();
-                    return {
-                        historyArchive: h.length,
-                        verifiedArchive: a.length,
-                        historyPlaces,
-                        archivePlaces
-                    };
-                }""",
-                value,
-            )
-
-            print(
-                f"VERIFY {value} "
-                f"stations={station_status[:220]}"
-            )
-
-            print(
-                f"VERIFY {value} "
-                f"save={save_status[:220]} "
-                f"check={postcheck}"
-            )
-
-            history_places = set(postcheck.get("historyPlaces") or [])
-            archive_places = set(postcheck.get("archivePlaces") or [])
-            if (
-                int(postcheck.get("historyArchive") or 0) < 2
-                or int(postcheck.get("verifiedArchive") or 0) < 2
-                or not expected_places.issubset(history_places)
-                or not expected_places.issubset(archive_places)
-            ):
-                raise RuntimeError(
-                    f"VERIFY_INTEGRITY_FAIL {value}: "
-                    f"history_archive={postcheck.get('historyArchive')} "
-                    f"verified_archive={postcheck.get('verifiedArchive')} "
-                    f"history_places={postcheck.get('historyPlaces')} "
-                    f"archive_places={postcheck.get('archivePlaces')}"
-                )
+            # Same station backend, independent validation, no immediate fallback.
+            payload = http_json(f"{backend}/stations", timeout=150)
+            verification_report = verify_independent(page, value, payload, run_key)
 
         # -----------------------------------------------------
         # Azioni programmate.
@@ -1043,12 +883,17 @@ def main(recovery_id: str | None = None) -> int:
     # Mantiene i metadati cloud e marca lo slot completato
     # solo dopo il successo delle operazioni meteo.
     # ---------------------------------------------------------
-    new_state["automationMeta"] = meta
-
-    new_state = merge_meta(
-        new_state,
-        run_key,
-    )
+    if verification_report is not None:
+        from station_verification import finalize_verification_state
+        fresh_state = http_json(f"{backend}/automation/state").get("state")
+        if not isinstance(fresh_state, dict):
+            raise RuntimeError("VERIFY_CLOUD_STATE_INVALID")
+        new_state = finalize_verification_state(
+            state, new_state, fresh_state, verification_report, run_key, merge_meta
+        )
+    else:
+        new_state["automationMeta"] = meta
+        new_state = merge_meta(new_state, run_key)
 
     result = http_json(
         f"{backend}/automation/state",
@@ -1092,6 +937,17 @@ def main(recovery_id: str | None = None) -> int:
             f"{type(exc).__name__}: {exc}",
             file=sys.stderr,
         )
+
+    if verification_report is not None and verification_report["status"] != "complete":
+        label = "DONE_PARTIAL" if verification_report["status"] == "partial" else "VERIFY_UNAVAILABLE"
+        print(
+            f"{label} {run_key} "
+            f"history={len(new_state.get('history', []))} "
+            f"archive={len(new_state.get('archive', []))} "
+            f"verified={verification_report['verifiedPlaces']} "
+            f"cloud={result.get('status', 'ok')}", flush=True
+        )
+        return 0 if verification_report["status"] == "partial" else 1
 
     print(
         f"DONE {run_key} "
