@@ -1,0 +1,46 @@
+name: Station isolation read-only audit
+on:
+  push:
+    branches: [fix/station-isolation-20261012]
+    paths: [.github/workflows/station-isolation-audit.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read production and archive source without writes
+        run: |
+          python3 - <<'PY'
+          import json, pathlib, re, shutil
+          from urllib.request import Request,urlopen
+          out=pathlib.Path('station-audit');out.mkdir()
+          def get(url):
+              with urlopen(Request(url,headers={'User-Agent':'MeteoArbus-station-isolation-audit/1.0'}),timeout=100) as r:return r.read().decode()
+          for f in pathlib.Path('.').glob('*.py'):shutil.copy(f,out/f.name)
+          html=get('https://meteo-arbus-guspini.netlify.app/')
+          (out/'frontend.html').write_text(html)
+          lines=html.splitlines();selected=set()
+          for i,line in enumerate(lines):
+              if re.search(r'function\s+(loadStationObservations|saveObservation|verifyArchived|renderAutomation|renderAuto|currentSettings)|Dati mancanti per|Ultima verifica automatica|meteoHistoryV5',line):
+                  selected.update(range(max(0,i-2),min(len(lines),i+130)))
+          for i in sorted(selected):print('FRONTEND_SOURCE',i+1,lines[i][:8000])
+          base='https://meteo-arbus-guspini-api.onrender.com'
+          raw=get(base+'/automation/state');(out/'state_before.json').write_text(raw)
+          state=json.loads(raw).get('state',{})
+          print('COUNTS',len(state.get('archive',[])),len(state.get('history',[])))
+          print('META',json.dumps(state.get('automationMeta')))
+          print('RECENT_ARCHIVE',json.dumps(state.get('archive',[])[-10:]))
+          print('RECENT_HISTORY',json.dumps(state.get('history',[])[-3:]))
+          schema=json.loads(get(base+'/openapi.json'));(out/'openapi.json').write_text(json.dumps(schema))
+          print('OBSERVATION_ROUTES',json.dumps({k:v for k,v in schema['paths'].items() if 'observ' in k or k=='/stations'}))
+          print('AUDIT_READONLY_PASS cloud_writes=0 station_observations_invented=0')
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: station-isolation-source
+          path: station-audit/
+          retention-days: 2
