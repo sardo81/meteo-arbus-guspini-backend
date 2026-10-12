@@ -1,0 +1,87 @@
+name: Test independent station verification
+on:
+  push:
+    branches: [fix/station-isolation-20261012]
+    paths: [.github/workflows/station-isolation-build.yml]
+permissions:
+  contents: write
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build guarded Cron patch
+        run: |
+          cp cron_automation.py /tmp/cron-before.py
+          python apply_station_isolation_patch.py
+          python -m py_compile cron_automation.py station_verification.py test_station_verification.py
+          python - <<'PY'
+          import ast,pathlib
+          old=ast.parse(pathlib.Path('/tmp/cron-before.py').read_text())
+          new=ast.parse(pathlib.Path('cron_automation.py').read_text())
+          for name in ['load_models_and_archive','set_time','merge_meta','normalized_slot']:
+              a=next(n for n in ast.walk(old) if isinstance(n,ast.FunctionDef) and n.name==name)
+              b=next(n for n in ast.walk(new) if isinstance(n,ast.FunctionDef) and n.name==name)
+              assert ast.dump(a)==ast.dump(b),name+' changed'
+              print('UNCHANGED_LOGIC_PASS',name)
+          PY
+      - name: Read real production sources and current archive
+        run: |
+          python - <<'PY'
+          import hashlib,json,pathlib
+          from datetime import datetime
+          from urllib.request import Request,urlopen
+          from station_verification import ROME,station_plan
+          out=pathlib.Path('isolation-evidence');out.mkdir()
+          def get(url):
+              with urlopen(Request(url,headers={'User-Agent':'MeteoArbus-station-isolation-validation/1.0'}),timeout=160) as r:return r.read().decode()
+          base='https://meteo-arbus-guspini-api.onrender.com'
+          html=get('https://meteo-arbus-guspini.netlify.app/')
+          pathlib.Path('frontend.html').write_text(html)
+          (out/'frontend.html').write_text(html)
+          print('FRONTEND_SHA256',hashlib.sha256(html.encode()).hexdigest())
+          before=json.loads(get(base+'/automation/state'))
+          (out/'state-before.json').write_text(json.dumps(before))
+          live=json.loads(get(base+'/stations'))
+          (out/'live-stations.json').write_text(json.dumps(live))
+          now=datetime.now(ROME)
+          # This only validates source freshness; it is NOT a forecast verification.
+          plan=station_plan(live,now.strftime('%Y-%m-%dT%H:%M'),now)
+          for key,item in plan.items():
+              print('LIVE_SOURCE',key,json.dumps({k:v for k,v in item.items() if k!='data'}))
+              if item.get('data'):print('LIVE_TEMPERATURE',key,item['data'].get('temperature_c'))
+          recent=json.loads(get(base+'/automation/observations/recent?limit=1000'))
+          (out/'recent-observations.json').write_text(json.dumps(recent))
+          after=json.loads(get(base+'/automation/state'))
+          (out/'state-after.json').write_text(json.dumps(after))
+          for key in ['history','archive']:
+              assert before['state'][key]==after['state'][key],key+' changed during audit'
+              print('LIVE_ARCHIVE_UNCHANGED',key,len(after['state'][key]),hashlib.sha256(json.dumps(after['state'][key],sort_keys=True).encode()).hexdigest())
+          print('LIVE_AUDIT_DONE forecast_comparisons_written=0 station_observations_invented=0')
+          PY
+      - name: Install browser test runtime
+        run: |
+          pip install playwright
+          playwright install --with-deps chromium
+      - name: Run regression tests with offline fixtures only
+        run: |
+          set -o pipefail
+          echo 'OFFLINE_FIXTURES_BEGIN: no network or production writes in tests'
+          python -m unittest -v test_station_verification test_model_transport test_snapshot_source 2>&1 | tee isolation-evidence/tests.txt
+      - name: Commit tested Cron on fix branch only
+        run: |
+          test "$GITHUB_REF_NAME" = 'fix/station-isolation-20261012'
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add cron_automation.py
+          git commit -m 'Integrate tested per-station verification; preserve partial status and history'
+          git push origin HEAD:fix/station-isolation-20261012
+          git rev-parse HEAD | tee isolation-evidence/tested-commit.txt
+          cp cron_automation.py station_verification.py test_station_verification.py isolation-evidence/
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: station-isolation-evidence
+          path: isolation-evidence/
+          retention-days: 3
