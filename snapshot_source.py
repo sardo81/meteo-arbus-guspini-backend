@@ -79,7 +79,12 @@ class SnapshotSource:
                 self.next_check = now + 60
                 try:
                     self.downloads += 1
-                    code, blob, _ = self.fetch(SNAPSHOT_URL)
+                    # raw.githubusercontent.com può servire per alcuni minuti
+                    # una copia CDN del branch anche dopo un nuovo commit.
+                    # Il parametro cambia ogni minuto e forza la lettura della
+                    # versione corrente senza alterare i bytes dello snapshot.
+                    snapshot_url = SNAPSHOT_URL + "?v=" + str(int(now // 60))
+                    code, blob, _ = self.fetch(snapshot_url)
                     if code != 200:
                         raise ValueError("Snapshot download HTTP " + str(code))
                     created, entries = decode_snapshot(blob, self.clock())
