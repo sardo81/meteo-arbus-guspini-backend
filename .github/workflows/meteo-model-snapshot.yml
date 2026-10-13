@@ -16,15 +16,20 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Keep the three Italian forecast cycles across daylight saving changes
+      - name: Keep every scheduled snapshot capture active despite GitHub queue delays
         id: gate
         run: |
           python3 - <<'PY'
           import os
-          from datetime import datetime
-          from zoneinfo import ZoneInfo
-          allowed = os.environ['GITHUB_EVENT_NAME'] != 'schedule' or datetime.now(ZoneInfo('Europe/Rome')).hour in (10,15,21)
-          with open(os.environ['GITHUB_OUTPUT'],'a') as f: f.write('run='+str(allowed).lower()+'\n')
+          # GitHub scheduled workflows may start minutes or hours after the
+          # nominal cron time. Never decide whether to capture from the actual
+          # wall-clock start time: that previously produced successful runs
+          # which skipped every model request. The six UTC schedules already
+          # cover CET and CEST; every scheduled invocation must capture.
+          allowed = True
+          with open(os.environ['GITHUB_OUTPUT'],'a') as f:
+              f.write('run='+str(allowed).lower()+'\n')
+          print('SNAPSHOT_GATE run=true event='+os.environ.get('GITHUB_EVENT_NAME',''))
           PY
       - uses: actions/checkout@v4
         if: steps.gate.outputs.run == 'true'
