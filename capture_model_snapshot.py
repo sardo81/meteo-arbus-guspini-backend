@@ -1,7 +1,8 @@
 """Capture eight current model responses once, atomically, with exact provenance.
 
-Run only in the single scheduled GitHub workflow. A source error stops the job;
-no IP rotation, no retries, no partial publication and no forecast-state writes.
+Run only in the single scheduled GitHub workflow. A source data error stops the job;
+transient network/TLS failures may be retried a small fixed number of times against
+the exact same URL. No IP rotation, no partial publication and no forecast-state writes.
 """
 from __future__ import annotations
 import base64
@@ -10,6 +11,8 @@ import hashlib
 import json
 import pathlib
 import sys
+import time
+from urllib.error import URLError
 from datetime import datetime, timezone
 from urllib.request import urlopen
 from model_transport import model_urls, canonical_url, request_bytes, valid_payload
@@ -24,7 +27,28 @@ def capture(destination):
     records = []
     for url in urls:
         canonical = canonical_url(url)
-        code, body, _ = request_bytes(canonical)
+        last_error = None
+        for attempt in range(1, 4):
+            try:
+                code, body, _ = request_bytes(canonical)
+                last_error = None
+                break
+            except (URLError, TimeoutError, OSError) as exc:
+                last_error = exc
+                print(
+                    "CAPTURE_TRANSPORT_RETRY",
+                    len(records) + 1,
+                    f"attempt={attempt}",
+                    type(exc).__name__,
+                    flush=True,
+                )
+                if attempt < 3:
+                    time.sleep(3)
+        if last_error is not None:
+            raise RuntimeError(
+                "Capture stopped after transient transport failures; "
+                "existing snapshot not replaced"
+            ) from last_error
         if code != 200:
             print("CAPTURE_SOURCE_UNAVAILABLE", code, body[:250].decode(errors="replace"), flush=True)
             raise RuntimeError("Capture stopped; existing snapshot not replaced")
