@@ -1860,6 +1860,54 @@ def health() -> Dict[str, str]:
 
 
 
+def _legacy_frontend_state_compat(result: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Compatibilità READ-ONLY per frontend/PWA ancora in cache.
+
+    Le vecchie versioni del frontend sceglievano l'ultima verifica solo da
+    automationMeta.completedRuns. Le verifiche parziali valide sono invece
+    conservate in partialRuns/verificationRuns. Esporre anche i partial run
+    nella copia restituita evita che un client vecchio resti fermo all'ultima
+    verifica completa, senza modificare lo stato persistito e senza trasformare
+    un run parziale in un successo completo.
+    """
+    if not isinstance(result, dict):
+        return result
+    state = result.get("state")
+    if not isinstance(state, dict):
+        return result
+
+    state_copy = dict(state)
+    meta = state_copy.get("automationMeta")
+    if not isinstance(meta, dict):
+        result["state"] = state_copy
+        return result
+
+    meta_copy = dict(meta)
+    completed = [x for x in meta_copy.get("completedRuns", []) if isinstance(x, str)]
+    partial = [x for x in meta_copy.get("partialRuns", []) if isinstance(x, str)]
+
+    for run_key in partial:
+        if run_key not in completed:
+            completed.append(run_key)
+
+    meta_copy["completedRuns"] = completed[-120:]
+
+    # Per i vecchi client, lastRun è solo un'etichetta visuale. Se esiste una
+    # verifica parziale successiva all'ultimo run completo, mostra il run
+    # processato più recente senza alterare lastSuccessAt o lo stato persistito.
+    if partial:
+        latest_partial = sorted(partial)[-1]
+        current_last = str(meta_copy.get("lastRun") or "")
+        if latest_partial > current_last:
+            meta_copy["lastRun"] = latest_partial
+
+    state_copy["automationMeta"] = meta_copy
+    out = dict(result)
+    out["state"] = state_copy
+    return out
+
+
 @api.get("/automation/state")
 def automation_state_get() -> Dict[str, Any]:
     if not _cloud_configured():
@@ -1870,7 +1918,7 @@ def automation_state_get() -> Dict[str, Any]:
         }
     result = cloud_state_get()
     result["configured"] = True
-    return result
+    return _legacy_frontend_state_compat(result)
 
 
 @api.post("/automation/state")
