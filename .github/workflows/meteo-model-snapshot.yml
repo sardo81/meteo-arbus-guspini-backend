@@ -48,8 +48,19 @@ jobs:
               p.write_text(s)
           for p in pathlib.Path('.').glob('*.py'): ast.parse(p.read_text(),filename=str(p))
           cron=pathlib.Path('cron_automation.py').read_text()
-          for guard in ['ARCHIVE_INTEGRITY_FAIL','VERIFY_INTEGRITY_FAIL','STATIONS_NOT_READY','CRON_FRONTEND_NOT_ISOLATED','VERIFY_NO_ARCHIVED_FORECAST']:
-              assert guard in cron,guard
+          station=pathlib.Path('station_verification.py').read_text()
+          guard_sources={
+              'ARCHIVE_INTEGRITY_FAIL': cron,
+              'CRON_FRONTEND_NOT_ISOLATED': cron,
+              'VERIFY_INTEGRITY_FAIL': station,
+          }
+          for guard,source in guard_sources.items():
+              assert guard in source,guard
+          # The independent verifier intentionally replaced the old
+          # STATIONS_NOT_READY / VERIFY_NO_ARCHIVED_FORECAST hard stops.
+          # Preserve the equivalent strict checks in station_verification.py.
+          for guard in ['no_archived_forecast','Fonte indisponibile','archiveValuesUnchanged']:
+              assert guard in station,guard
           print('PYTHON_SYNTAX_PASS INTEGRITY_GUARDS_PRESERVED')
           PY
       - name: Test exact bytes, freshness, tampering, source allowlist and request bounds
