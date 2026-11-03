@@ -1,48 +1,48 @@
 {
   "version": 1,
-  "created_at": "2026-11-03T23:44:10.678222+00:00",
+  "created_at": "2026-11-03T23:57:49.639755+00:00",
   "requests": 8,
-  "sha256": "b26a4bda6efb359a934d893095f2ed1e1f753e468dce45b48500ccbc56816748",
+  "sha256": "0a853fa11cc437fd99e3df695eedc008402260c2bd6031b1bbe599417b61e95d",
   "responses": [
     {
       "url": "https://api.open-meteo.com/v1/gfs?elevation=nan&forecast_days=15&hourly=temperature_2m%2Crelative_humidity_2m%2Cdew_point_2m%2Cprecipitation%2Cpressure_msl%2Ccloud_cover%2Cwind_speed_10m%2Cwind_direction_10m%2Cwind_gusts_10m%2Ctemperature_925hPa%2Cgeopotential_height_925hPa%2Ctemperature_850hPa%2Cgeopotential_height_850hPa%2Crain%2Cshowers%2Ccape%2Clifted_index%2Cconvective_inhibition%2Cweather_code&latitude=39.526&longitude=8.6&timezone=Europe%2FRome&wind_speed_unit=kmh",
-      "fetched_at": "2026-11-03T23:44:05.672750+00:00",
-      "sha256": "cc8aa159040ea1d81acf0aa1447a5e3aa8d2733c16e11d3fdf0d0bf47b85d3f2"
+      "fetched_at": "2026-11-03T23:57:41.224875+00:00",
+      "sha256": "2422e4f0138996501d55438a1ba5a123c973138896444973de88f77402ad9f23"
     },
     {
       "url": "https://api.open-meteo.com/v1/ecmwf?elevation=nan&forecast_days=15&hourly=temperature_2m%2Crelative_humidity_2m%2Cdew_point_2m%2Cprecipitation%2Cpressure_msl%2Ccloud_cover%2Cwind_speed_10m%2Cwind_direction_10m%2Cwind_gusts_10m%2Ctemperature_925hPa%2Cgeopotential_height_925hPa%2Ctemperature_850hPa%2Cgeopotential_height_850hPa%2Crain%2Cshowers%2Ccape%2Cconvective_inhibition%2Cweather_code&latitude=39.526&longitude=8.6&timezone=Europe%2FRome&wind_speed_unit=kmh",
-      "fetched_at": "2026-11-03T23:44:05.802509+00:00",
-      "sha256": "eced5adb3cde6d5b159c3a472401ce25cbf5476573a35de93c1cd1f0229bc696"
+      "fetched_at": "2026-11-03T23:57:41.533482+00:00",
+      "sha256": "b41fdbbde871ad3c142494b8c4fe2027c615297ef6e2e1464fd0b7f079cda0d8"
     },
     {
       "url": "https://ensemble-api.open-meteo.com/v1/ensemble?elevation=nan&forecast_days=15&hourly=temperature_2m%2Crelative_humidity_2m%2Cdew_point_2m%2Cprecipitation%2Cpressure_msl%2Cwind_speed_10m%2Cwind_direction_10m%2Cwind_gusts_10m&latitude=39.526&longitude=8.6&models=gfs025&timezone=Europe%2FRome&wind_speed_unit=kmh",
-      "fetched_at": "2026-11-03T23:44:06.746654+00:00",
-      "sha256": "ccbb51ff8b4a48ef7b2aa93973b57363066f9a2d152d71d8e18f49ecd47bee69"
+      "fetched_at": "2026-11-03T23:57:42.654597+00:00",
+      "sha256": "0d7162471b096637eff4cace57ca0d79cfd1f96f80bb1146985b438d8b1fdf63"
     },
     {
       "url": "https://ensemble-api.open-meteo.com/v1/ensemble?elevation=nan&forecast_days=15&hourly=temperature_2m%2Crelative_humidity_2m%2Cdew_point_2m%2Cprecipitation%2Cpressure_msl%2Cwind_speed_10m%2Cwind_direction_10m%2Cwind_gusts_10m&latitude=39.526&longitude=8.6&models=ecmwf_ifs025&timezone=Europe%2FRome&wind_speed_unit=kmh",
-      "fetched_at": "2026-11-03T23:44:07.681523+00:00",
-      "sha256": "ccefc36beefc347f106fb272dc04cc38f951fdbd521fe8a8aeaf143d3045b7e3"
+      "fetched_at": "2026-11-03T23:57:43.847644+00:00",
+      "sha256": "ad26714922f9cf81102d055f17408c481d0cab6d7604f4ced1c99d2b3e8c8fba"
     },
     {
       "url": "https://api.open-meteo.com/v1/gfs?elevation=nan&forecast_days=15&hourly=temperature_2m%2Crelative_humidity_2m%2Cdew_point_2m%2Cprecipitation%2Cpressure_msl%2Ccloud_cover%2Cwind_speed_10m%2Cwind_direction_10m%2Cwind_gusts_10m%2Ctemperature_925hPa%2Cgeopotential_height_925hPa%2Ctemperature_850hPa%2Cgeopotential_height_850hPa%2Crain%2Cshowers%2Ccape%2Clifted_index%2Cconvective_inhibition%2Cweather_code&latitude=39.54&longitude=8.635&timezone=Europe%2FRome&wind_speed_unit=kmh",
-      "fetched_at": "2026-11-03T23:44:08.245590+00:00",
-      "sha256": "139fab356d3071c84aa37e0889b354275e88b286b73c1f92d83355a27a9460ad"
+      "fetched_at": "2026-11-03T23:57:44.156467+00:00",
+      "sha256": "62d609ae0d206160d575d424da94b32732dd5b6c31fccb7e86676c5f20022ed5"
     },
     {
       "url": "https://api.open-meteo.com/v1/ecmwf?elevation=nan&forecast_days=15&hourly=temperature_2m%2Crelative_humidity_2m%2Cdew_point_2m%2Cprecipitation%2Cpressure_msl%2Ccloud_cover%2Cwind_speed_10m%2Cwind_direction_10m%2Cwind_gusts_10m%2Ctemperature_925hPa%2Cgeopotential_height_925hPa%2Ctemperature_850hPa%2Cgeopotential_height_850hPa%2Crain%2Cshowers%2Ccape%2Cconvective_inhibition%2Cweather_code&latitude=39.54&longitude=8.635&timezone=Europe%2FRome&wind_speed_unit=kmh",
-      "fetched_at": "2026-11-03T23:44:08.882271+00:00",
-      "sha256": "39eb536331e49f7e818176eff0da9476e3b98ae987490382178e14d3fe5c146a"
+      "fetched_at": "2026-11-03T23:57:47.295049+00:00",
+      "sha256": "c78a231a099d21402c5ac1b849712aabfdb300165771710a389ff921796aac48"
     },
     {
       "url": "https://ensemble-api.open-meteo.com/v1/ensemble?elevation=nan&forecast_days=15&hourly=temperature_2m%2Crelative_humidity_2m%2Cdew_point_2m%2Cprecipitation%2Cpressure_msl%2Cwind_speed_10m%2Cwind_direction_10m%2Cwind_gusts_10m&latitude=39.54&longitude=8.635&models=gfs025&timezone=Europe%2FRome&wind_speed_unit=kmh",
-      "fetched_at": "2026-11-03T23:44:09.747863+00:00",
-      "sha256": "1fba50ee610b3ec34393ee624e53c479500e0cb2755aebc0201834e8770c5a36"
+      "fetched_at": "2026-11-03T23:57:48.423891+00:00",
+      "sha256": "e146d929bddfbaee1993169877f9534203688728dd5ba36a0437a7e3feb9cda6"
     },
     {
       "url": "https://ensemble-api.open-meteo.com/v1/ensemble?elevation=nan&forecast_days=15&hourly=temperature_2m%2Crelative_humidity_2m%2Cdew_point_2m%2Cprecipitation%2Cpressure_msl%2Cwind_speed_10m%2Cwind_direction_10m%2Cwind_gusts_10m&latitude=39.54&longitude=8.635&models=ecmwf_ifs025&timezone=Europe%2FRome&wind_speed_unit=kmh",
-      "fetched_at": "2026-11-03T23:44:10.676289+00:00",
-      "sha256": "ffd372f983d82512b81237b572164122769fb6ccf47871a0b48c6ae907d90338"
+      "fetched_at": "2026-11-03T23:57:49.637978+00:00",
+      "sha256": "96f4396ae37b259a3277de617ce664f8a1ad699cb5d05edc597621618fb1a913"
     }
   ]
 }
