@@ -11,6 +11,8 @@ permissions:
 concurrency:
   group: meteo-model-snapshot
   cancel-in-progress: false
+env:
+  METEO_STATE_URL: https://meteo-arbus-api-4yyk5yh4cq-ew.a.run.app/automation/state
 jobs:
   capture:
     runs-on: ubuntu-latest
@@ -70,12 +72,12 @@ jobs:
         if: steps.gate.outputs.run == 'true'
         run: |
           python3 - <<'PY'
-          import urllib.request,json,subprocess
+          import urllib.request,json,subprocess,os
           from model_transport import model_urls,canonical_url
           def get(url):
               with urllib.request.urlopen(url,timeout=45) as r:return r.read().decode()
           html=get('https://meteo-arbus-guspini.netlify.app/')
-          st=json.loads(get('https://meteo-arbus-guspini-api.onrender.com/automation/state'))['state']['settings']
+          st=json.loads(get(os.environ['METEO_STATE_URL']))['state']['settings']
           js=html[html.index('function apiUrl('):html.index('function longRangeApiUrl(')]
           js+='\nconst st='+json.dumps(st)+';const out=[];for(const p of ["arbus","guspini"]){for(const m of ["gfs","ecmwf"])out.push(apiUrl(m,st[p].lat,st[p].lon,true));for(const m of ["gfs025","ecmwf_ifs025"])out.push(ensembleApiUrl(m,st[p].lat,st[p].lon));}console.log(JSON.stringify(out));'
           urls=json.loads(subprocess.check_output(['node','-e',js]))
