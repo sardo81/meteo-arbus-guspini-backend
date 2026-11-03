@@ -9,6 +9,7 @@ import base64
 import gzip
 import hashlib
 import json
+import os
 import pathlib
 import sys
 import time
@@ -19,7 +20,7 @@ from model_transport import model_urls, canonical_url, request_bytes, valid_payl
 
 
 def capture(destination):
-    with urlopen("https://meteo-arbus-guspini-api.onrender.com/automation/state", timeout=45) as response:
+    with urlopen(os.getenv("METEO_STATE_URL", "https://meteo-arbus-guspini-api.onrender.com/automation/state"), timeout=45) as response:
         state = json.load(response)["state"]
     urls = list(model_urls(state["settings"]))
     if len(urls) != 8 or len(set(map(canonical_url, urls))) != 8:
