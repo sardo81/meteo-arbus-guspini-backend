@@ -17,6 +17,8 @@ from model_transport import canonical_url, request_bytes, valid_payload
 
 log = logging.getLogger("meteo.snapshot_source")
 SNAPSHOT_URL = "https://raw.githubusercontent.com/sardo81/meteo-arbus-guspini-backend/meteo-model-data/model-snapshot.json.gz"
+BRANCH_API = "https://api.github.com/repos/sardo81/meteo-arbus-guspini-backend/branches/meteo-model-data"
+SNAPSHOT_BY_SHA = "https://raw.githubusercontent.com/sardo81/meteo-arbus-guspini-backend/{sha}/model-snapshot.json.gz"
 MAX_AGE = 3600
 MAX_DECOMPRESSED = 40 * 1024 * 1024
 
@@ -63,6 +65,10 @@ def decode_snapshot(blob, now):
 class SnapshotSource:
     def __init__(self, fetch=request_bytes, clock=time.time):
         self.fetch, self.clock = fetch, clock
+        # Test/fake transports keep the single-download contract. Production
+        # resolves the data branch to an immutable commit SHA first, avoiding
+        # stale branch-alias responses from raw.githubusercontent.com.
+        self.resolve_branch_sha = fetch is request_bytes
         self.lock = threading.Lock()
         self.entries = {}
         self.created = 0.0
@@ -79,11 +85,18 @@ class SnapshotSource:
                 self.next_check = now + 60
                 try:
                     self.downloads += 1
-                    # raw.githubusercontent.com può servire per alcuni minuti
-                    # una copia CDN del branch anche dopo un nuovo commit.
-                    # Il parametro cambia ogni minuto e forza la lettura della
-                    # versione corrente senza alterare i bytes dello snapshot.
-                    snapshot_url = SNAPSHOT_URL + "?v=" + str(int(now // 60))
+                    if self.resolve_branch_sha:
+                        branch_url = BRANCH_API + "?v=" + str(int(now // 60))
+                        branch_code, branch_body, _ = self.fetch(branch_url)
+                        if branch_code != 200:
+                            raise ValueError("Snapshot branch lookup HTTP " + str(branch_code))
+                        branch_doc = json.loads(branch_body)
+                        sha = str(((branch_doc.get("commit") or {}).get("sha") or ""))
+                        if len(sha) != 40 or any(c not in "0123456789abcdef" for c in sha.lower()):
+                            raise ValueError("Invalid snapshot branch commit SHA")
+                        snapshot_url = SNAPSHOT_BY_SHA.format(sha=sha)
+                    else:
+                        snapshot_url = SNAPSHOT_URL + "?v=" + str(int(now // 60))
                     code, blob, _ = self.fetch(snapshot_url)
                     if code != 200:
                         raise ValueError("Snapshot download HTTP " + str(code))
