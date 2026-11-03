@@ -51,6 +51,8 @@ _cache: Dict[str, Any] = {"timestamp": 0.0, "data": None}
 # --- Archivio cloud per automazione -----------------------------------------
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip().rstrip("/")
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+SUPABASE_PROXY_URL = os.getenv("SUPABASE_PROXY_URL", "").strip().rstrip("/")
+SUPABASE_PROXY_SECRET = os.getenv("SUPABASE_PROXY_SECRET", "").strip()
 AUTOMATION_SECRET = os.getenv("AUTOMATION_SECRET", "").strip()
 MANUAL_EDIT_SECRET = os.getenv("MANUAL_EDIT_SECRET", "").strip()
 AUTOMATION_STATE_ID = "main"
@@ -84,20 +86,45 @@ NOTIFICATION_SENT_RETENTION_HOURS = 72
 
 
 def _cloud_configured() -> bool:
-    return bool(SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY)
+    direct = bool(SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY)
+    proxy = bool(SUPABASE_PROXY_URL and SUPABASE_PROXY_SECRET)
+    return direct or proxy
 
 
 def _supabase_request(path: str, method: str = "GET", payload: Any = None, prefer: Optional[str] = None) -> Any:
     if not _cloud_configured():
-        raise RuntimeError("Archivio cloud non configurato: mancano SUPABASE_URL o SUPABASE_SERVICE_ROLE_KEY")
+        raise RuntimeError("Archivio cloud non configurato: manca accesso Supabase diretto o proxy")
+
+    # Northflank usa un proxy Edge Function autenticato dedicato, così la
+    # service_role Supabase non deve lasciare Supabase né essere copiata da Render.
+    if SUPABASE_PROXY_URL and SUPABASE_PROXY_SECRET:
+        proxy_payload = {"path": path, "method": method, "payload": payload, "prefer": prefer}
+        body = json.dumps(proxy_payload).encode("utf-8")
+        request = Request(
+            SUPABASE_PROXY_URL,
+            data=body,
+            headers={
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+                "X-Meteo-Proxy-Secret": SUPABASE_PROXY_SECRET,
+            },
+            method="POST",
+        )
+        try:
+            with urlopen(request, timeout=35) as response:
+                raw = response.read().decode("utf-8")
+                return json.loads(raw) if raw else None
+        except HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"Supabase proxy HTTP {exc.code}: {detail[:500]}") from exc
+        except URLError as exc:
+            raise RuntimeError(f"Supabase proxy non raggiungibile: {exc}") from exc
+
     body = None if payload is None else json.dumps(payload).encode("utf-8")
     headers = {
         "apikey": SUPABASE_SERVICE_ROLE_KEY,
         "Accept": "application/json",
     }
-    # Le nuove chiavi Supabase sb_secret_* non sono JWT e non devono
-    # essere inviate come Bearer token. Manteniamo invece compatibilita'
-    # con la vecchia service_role JWT, se in futuro venisse usata.
     if not SUPABASE_SERVICE_ROLE_KEY.startswith("sb_secret_"):
         headers["Authorization"] = f"Bearer {SUPABASE_SERVICE_ROLE_KEY}"
     if body is not None:
