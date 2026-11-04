@@ -30,6 +30,14 @@ STATIONS = {
     },
 }
 
+STATION_SOURCE_MODE = os.getenv("METEO_STATION_SOURCE", "playwright").strip().lower()
+WU_API_KEY = os.getenv("WU_API_KEY", "").strip()
+WU_CURRENT_URL = (
+    "https://api.weather.com/v2/pws/observations/current"
+    "?stationId={station_id}&numericPrecision=decimal&format=json"
+    "&units=m&extraVars=1&apiKey={api_key}"
+)
+
 VALID_WIND_DIRS = {
     "N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE",
     "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW",
@@ -681,7 +689,59 @@ def scrape_station(browser: Browser, code: str, meta: Dict[str, str]) -> Dict[st
         page.close()
 
 
+def _collect_station_direct(code: str, meta: Dict[str, str]) -> Dict[str, Any]:
+    """Read the same Weather.com PWS JSON used by the public WU dashboard.
+
+    This is intentionally current-observation only. Rolling rain events are
+    derived from successive archived samples by _update_rain_monitor_state,
+    so the five-minute collector does not need a browser or historical page.
+    """
+    output: Dict[str, Any] = {
+        "station_code": code,
+        "station_name": meta["name"],
+        "url": meta["url"],
+        "captured_at_utc": datetime.now(timezone.utc).isoformat(),
+        "parser_version": "14.1-weather-com-direct",
+        "source": "weather_com_pws_current",
+        "data": None,
+        "errors": [],
+        "diagnostics": {"transport": "direct_json"},
+    }
+    if not WU_API_KEY:
+        output["errors"].append("RuntimeError: WU_API_KEY non configurata")
+        return output
+    url = WU_CURRENT_URL.format(station_id=code, api_key=WU_API_KEY)
+    request = Request(
+        url,
+        headers={
+            "Accept": "application/json",
+            "User-Agent": "Mozilla/5.0 MeteoArbus/14.1",
+        },
+        method="GET",
+    )
+    try:
+        with urlopen(request, timeout=25) as response:
+            raw = response.read().decode("utf-8", errors="replace")
+        payload = json.loads(raw) if raw.strip() else {}
+        observations = payload.get("observations") if isinstance(payload, dict) else None
+        latest = observations[0] if isinstance(observations, list) and observations and isinstance(observations[0], dict) else None
+        if latest is None:
+            raise RuntimeError("Nessuna osservazione reale nel feed PWS corrente")
+        output["data"] = parse_observation(latest)
+        output["data"]["source"] = "weather_com_pws_current"
+        output["data"]["parser_version"] = "14.1-weather-com-direct"
+        output["data"]["wind_direction_source"] = "current_observation"
+        output["data"]["wind_direction_age_seconds"] = 0
+        return output
+    except Exception as exc:
+        output["errors"].append(f"{type(exc).__name__}: {exc}")
+        return output
+
+
 def collect_all() -> Dict[str, Any]:
+    if STATION_SOURCE_MODE == "weather-com-direct":
+        return {code: _collect_station_direct(code, meta) for code, meta in STATIONS.items()}
+
     results: Dict[str, Any] = {}
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(
