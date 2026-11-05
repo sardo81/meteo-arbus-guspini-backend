@@ -1,10 +1,5 @@
 name: Meteo exact model snapshots
 on:
-  push:
-    branches: [main, fix/meteo-api-20261011]
-    paths: ['snapshot_source.py', 'capture_model_snapshot.py', 'test_snapshot_source.py', '.github/workflows/meteo-model-snapshot.yml']
-  schedule:
-    - cron: '10 8,9,13,14,19,20 * * *'
   workflow_dispatch:
 permissions:
   contents: write
@@ -18,16 +13,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Keep every scheduled snapshot capture active despite GitHub queue delays
+      - name: Enable manual snapshot capture
         id: gate
         run: |
           python3 - <<'PY'
           import os
-          # GitHub scheduled workflows may start minutes or hours after the
-          # nominal cron time. Never decide whether to capture from the actual
-          # wall-clock start time: that previously produced successful runs
-          # which skipped every model request. The six UTC schedules already
-          # cover CET and CEST; every scheduled invocation must capture.
           allowed = True
           with open(os.environ['GITHUB_OUTPUT'],'a') as f:
               f.write('run='+str(allowed).lower()+'\n')
@@ -58,9 +48,6 @@ jobs:
           }
           for guard,source in guard_sources.items():
               assert guard in source,guard
-          # The independent verifier intentionally replaced the old
-          # STATIONS_NOT_READY / VERIFY_NO_ARCHIVED_FORECAST hard stops.
-          # Preserve the equivalent strict checks in station_verification.py.
           for guard in ['no_archived_forecast','Fonte indisponibile','archiveValuesUnchanged']:
               assert guard in station,guard
           print('PYTHON_SYNTAX_PASS INTEGRITY_GUARDS_PRESERVED')
