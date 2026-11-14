@@ -2,6 +2,10 @@ name: MeteoArbus station observations
 on:
   schedule:
     - cron: '2-59/5 * * * *'
+  push:
+    paths:
+      - '.github/workflows/stations-live.yml'
+      - 'scripts/meteoarbus_station_publish.py'
   workflow_dispatch:
 permissions:
   contents: read
