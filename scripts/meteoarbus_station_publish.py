@@ -71,7 +71,18 @@ def main():
         doc["updated_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
         content = json.dumps(doc, ensure_ascii=False, indent=2).encode()
         ftp.storbinary("STOR " + REMOTE, io.BytesIO(content))
-    print("PUBLISHED", ",".join(readings), "bytes", len(content))
+        # A successful FTP STOR does not prove the public feed was updated.
+        # Read back the remote file and fail this job on mismatched contents.
+        verify_buf = io.BytesIO()
+        ftp.retrbinary("RETR " + REMOTE, verify_buf.write)
+        verified = json.loads(verify_buf.getvalue())
+        if verified.get("updated_at") != doc["updated_at"]:
+            raise RuntimeError("FTP verification failed: publication timestamp differs")
+        for place, value in readings.items():
+            published = verified.get("stations", {}).get(place, {})
+            if published.get("updated_at") != value["updated_at"]:
+                raise RuntimeError("FTP verification failed: " + place + " observation differs")
+    print("PUBLISHED_AND_VERIFIED", ",".join(readings), "bytes", len(content))
 
 if __name__ == "__main__":
     main()
