@@ -82,7 +82,29 @@ def main():
             published = verified.get("stations", {}).get(place, {})
             if published.get("updated_at") != value["updated_at"]:
                 raise RuntimeError("FTP verification failed: " + place + " observation differs")
-    print("PUBLISHED_AND_VERIFIED", ",".join(readings), "bytes", len(content))
+    print("FTP_PUBLISHED_AND_VERIFIED", ",".join(readings), "bytes", len(content))
+    # Confirm that the URL consumed by Android exposes the *same* observations.
+    # FTP success by itself is not sufficient: a different document root,
+    # rewrites, or another publisher can leave the public file stale.
+    import urllib.parse
+    public_url = ("https://www.meteoarbus.it/test-v2/data/live.json?station_publish_check="
+                  + urllib.parse.quote(doc["updated_at"]))
+    req = urllib.request.Request(public_url, headers={
+        "User-Agent": "MeteoArbus-station-verify/1.0",
+        "Cache-Control": "no-cache",
+        "Accept": "application/json",
+    })
+    with urllib.request.urlopen(req, timeout=25) as response:
+        public = json.load(response)
+    for place, value in readings.items():
+        public_stamp = public.get("stations", {}).get(place, {}).get("updated_at")
+        if public_stamp != value["updated_at"]:
+            raise RuntimeError(
+                "PUBLIC_FEED_STALE: " + place + " expected=" + value["updated_at"]
+                + " actual=" + str(public_stamp)
+                + " (FTP upload did not update the public URL)"
+            )
+    print("PUBLIC_FEED_VERIFIED", ",".join(readings))
 
 if __name__ == "__main__":
     main()
