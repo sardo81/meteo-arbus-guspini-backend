@@ -1,0 +1,27 @@
+name: MeteoArbus station observations
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: meteoarbus-stations-live
+  cancel-in-progress: false
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    env:
+      METEO_WU_API_KEY: ${{ secrets.METEO_WU_API_KEY }}
+      METEO_FTP_USER: ${{ secrets.METEO_FTP_USER }}
+      METEO_FTP_PASSWORD: ${{ secrets.METEO_FTP_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check required credentials
+        run: |
+          test -n "$METEO_WU_API_KEY"
+          test -n "$METEO_FTP_USER"
+          test -n "$METEO_FTP_PASSWORD"
+      - name: Publish only fresh real station readings
+        run: python3 scripts/meteoarbus_station_publish.py
