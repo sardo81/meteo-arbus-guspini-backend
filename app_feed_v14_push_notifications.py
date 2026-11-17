@@ -140,9 +140,9 @@ def cloud_state_put(state: Dict[str, Any]) -> Dict[str, Any]:
         "automation_state?on_conflict=id",
         method="POST",
         payload=[row],
-        prefer="resolution=merge-duplicates,return=representation",
+        prefer="resolution=merge-duplicates,return=minimal",
     )
-    return {"status": "ok", "rows": len(result or []), "updated_at": row["updated_at"]}
+    return {"status": "ok", "rows": 1, "updated_at": row["updated_at"]}
 
 
 def safe_float(value: Any) -> Optional[float]:
